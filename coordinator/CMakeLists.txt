@@ -35,6 +35,7 @@ endif()
 
 # Core library: everything except main(), so tests link the same code the binary runs.
 add_library(orch_core
+    src/metrics.cpp
     src/version.cpp)
 target_include_directories(orch_core PUBLIC include)
 target_link_libraries(orch_core PUBLIC orch_options)

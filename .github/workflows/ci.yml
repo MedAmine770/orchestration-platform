@@ -80,3 +80,14 @@ jobs:
       - name: Test
         working-directory: coordinator
         run: ctest --preset ${{ matrix.preset }}
+
+      # Validate our hand-written exposition format with Prometheus's own
+      # parser and linter. Once per run is enough: the output doesn't depend
+      # on OS or sanitizer.
+      - name: Validate /metrics output with promtool
+        if: runner.os == 'Linux' && matrix.preset == 'debug-asan'
+        working-directory: coordinator
+        run: |
+          set -o pipefail
+          ./build/${{ matrix.preset }}/tests/metrics_sample \
+            | docker run --rm -i --entrypoint promtool prom/prometheus:v3.5.0 check metrics
