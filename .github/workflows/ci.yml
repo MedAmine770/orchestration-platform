@@ -81,6 +81,22 @@ jobs:
         working-directory: coordinator
         run: ctest --preset ${{ matrix.preset }}
 
+      # Against the ASan binary: a memory error in session code makes the
+      # coordinator exit non-zero on SIGTERM, which fails the test.
+      - name: Set up Python
+        if: runner.os == 'Linux' && matrix.preset == 'debug-asan'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Integration tests
+        if: runner.os == 'Linux' && matrix.preset == 'debug-asan'
+        env:
+          ORCH_COORDINATOR_BIN: coordinator/build/debug-asan/coordinator
+        run: |
+          pip install -r tests/integration/requirements.txt
+          python -m pytest -q tests/integration
+
       # Validate our hand-written exposition format with Prometheus's own
       # parser and linter. Once per run is enough: the output doesn't depend
       # on OS or sanitizer.

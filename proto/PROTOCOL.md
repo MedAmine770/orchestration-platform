@@ -78,3 +78,24 @@ the connection is closed (DESIGN.md §7.3).
 
 The first failing rule wins; the test vectors use inputs with exactly one fault,
 so both codecs report the same code regardless of check order.
+
+Known divergence: an integer literal above 2⁶⁴ − 1 is rejected by both codecs,
+but the C++ parser reads it as a float (`wrong_type`) while Python reads an
+exact integer (`invalid_value`). No vector covers it; no valid sender produces it.
+
+## Closing
+
+The worker's first frame must be `hello`, within the coordinator's hello
+timeout (default 5 s). The coordinator closes the WebSocket with:
+
+| Code | When | Reason text |
+|---|---|---|
+| 1008 policy violation | bad token | `authentication failed` |
+| 1008 | first frame isn't `hello` | `first message must be hello` |
+| 1008 | no `hello` within the timeout | `hello timeout` |
+| 1002 protocol error | a frame fails decoding | the error code, e.g. `wrong_type` |
+| 1002 | a second `hello`, or a C→W type sent by the worker | e.g. `duplicate hello` |
+| 1009 message too big | a frame over 64 KiB | (sent by the WebSocket layer) |
+| 4000 replaced | another session authenticated with the same `node_id` | `replaced by a newer session` |
+
+Close reasons are short ASCII strings; details stay in the coordinator's log.
