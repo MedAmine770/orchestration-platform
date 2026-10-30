@@ -35,6 +35,7 @@ endif()
 
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
+find_package(boost_hash2 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
 # Core library: everything except main(), so tests link the same code the binary runs.
@@ -50,7 +51,7 @@ add_library(orch_core
 target_include_directories(orch_core PUBLIC include PRIVATE src)
 target_link_libraries(orch_core
     PUBLIC orch_options Boost::beast Threads::Threads
-    PRIVATE nlohmann_json::nlohmann_json)  # JSON stays out of our public headers
+    PRIVATE nlohmann_json::nlohmann_json Boost::hash2)  # kept out of our public headers
 
 add_executable(coordinator src/main.cpp)
 target_include_directories(coordinator PRIVATE src)

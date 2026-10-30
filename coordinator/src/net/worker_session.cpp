@@ -1,6 +1,5 @@
 #include "net/worker_session.hpp"
 
-#include <algorithm>
 #include <iostream>
 #include <utility>
 #include <variant>
@@ -16,19 +15,6 @@ namespace {
 
 constexpr std::size_t kMaxFrameBytes = 64 * 1024;  // proto/PROTOCOL.md "Transport"
 constexpr auto kHandshakeTimeout = std::chrono::seconds(5);
-
-// Compares in time that depends only on the lengths, not on where the inputs
-// first differ, so response timing doesn't leak how much of a guess was right.
-bool tokens_equal(std::string_view a, std::string_view b) {
-    unsigned char diff = a.size() == b.size() ? 0 : 1;
-    const std::size_t n = std::max(a.size(), b.size());
-    for (std::size_t i = 0; i < n; ++i) {
-        const auto x = static_cast<unsigned char>(i < a.size() ? a[i] : 0);
-        const auto y = static_cast<unsigned char>(i < b.size() ? b[i] : 0);
-        diff = static_cast<unsigned char>(diff | (x ^ y));
-    }
-    return diff == 0;
-}
 
 template <typename... Fs>
 struct Overloaded : Fs... {
@@ -126,7 +112,7 @@ void WorkerSession::handle(std::string_view frame) {
 }
 
 void WorkerSession::handle_hello(const protocol::Hello& hello) {
-    if (!tokens_equal(hello.token, server_.config().cluster_token)) {
+    if (!server_.token_matches(hello.token)) {
         server_.metrics().auth_failures.inc();
         std::cerr << "rejected node " << hello.node_id << ": bad cluster token\n";
         close(kClosePolicy, "authentication failed");

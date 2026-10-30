@@ -1,8 +1,10 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <boost/asio/io_context.hpp>
@@ -40,6 +42,12 @@ class Server {
     const metrics::Registry& registry() const { return registry_; }
     CoordinatorMetrics& metrics() { return metrics_; }
 
+    // Checks a worker's token without leaking the configured token through
+    // timing: both sides are SHA-256 digests (the configured one computed once
+    // at startup), compared byte-for-byte in constant time. Hashing time
+    // depends only on the submitted token, which the caller already knows.
+    bool token_matches(std::string_view submitted) const;
+
     // Called by WorkerSession. A second session for the same node_id replaces
     // the first, which is closed with code 4000 (DESIGN.md §7.3).
     void on_authenticated(const std::shared_ptr<WorkerSession>& session);
@@ -52,6 +60,7 @@ class Server {
     boost::asio::io_context& ioc_;
     boost::asio::ip::tcp::acceptor acceptor_;
     ServerConfig config_;
+    std::array<unsigned char, 32> token_digest_{};
     const metrics::Registry& registry_;
     CoordinatorMetrics& metrics_;
     // weak_ptr: the table observes sessions, it doesn't keep them alive.

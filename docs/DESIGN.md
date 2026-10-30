@@ -296,9 +296,10 @@ this message rate.
 ### 7.3 Worker authentication and identity
 
 - The first frame **must** be `hello` within 5 s; anything else closes the socket.
-- `token` is compared in constant time with the coordinator's `CLUSTER_TOKEN`. On a
-  mismatch the socket is closed with code `1008` (policy violation) and the failure is
-  counted.
+- `token` is checked against the coordinator's `CLUSTER_TOKEN` by comparing SHA-256
+  digests in constant time (the configured digest is computed once at startup), so
+  response timing reveals neither the token's content nor its length. On a mismatch
+  the socket is closed with code `1008` (policy violation) and the failure is counted.
 - Over plain `ws://` the token is visible to anyone on the network. That is acceptable
   for a trusted LAN or Compose network; TLS is a non-goal (§1).
 - **Duplicate `node_id`:** a new authenticated session replaces the old one, which is
