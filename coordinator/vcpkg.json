@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "builtin-baseline": "ab9a05e70421507222d83861ac1a31be7e4272d4",
   "dependencies": [
-    "gtest"
+    "gtest",
+    "nlohmann-json"
   ]
 }

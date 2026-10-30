@@ -1,0 +1,47 @@
+[
+  {"name": "not_json", "raw": "{\"v\": 1, \"type\": ", "error": "malformed_json"},
+  {"name": "envelope_is_array", "message": [1, 2, 3], "error": "not_object"},
+  {"name": "body_is_string", "message": {"v": 1, "type": "ack", "body": "x"}, "error": "not_object"},
+
+  {"name": "missing_v", "message": {"type": "ack", "body": {"job_id": "j", "attempt": 1}}, "error": "missing_field"},
+  {"name": "missing_type", "message": {"v": 1, "body": {}}, "error": "missing_field"},
+  {"name": "missing_body", "message": {"v": 1, "type": "ack"}, "error": "missing_field"},
+  {"name": "missing_attempt", "message": {"v": 1, "type": "ack", "body": {"job_id": "j"}}, "error": "missing_field"},
+  {"name": "hello_missing_capabilities", "message": {"v": 1, "type": "hello", "body": {
+      "token": "t", "node_id": "n", "agent_version": "0.1.0", "slots": 1, "running": []}}, "error": "missing_field"},
+
+  {"name": "v_is_string", "message": {"v": "1", "type": "ack", "body": {"job_id": "j", "attempt": 1}}, "error": "wrong_type"},
+  {"name": "type_is_number", "message": {"v": 1, "type": 7, "body": {}}, "error": "wrong_type"},
+  {"name": "attempt_is_float", "message": {"v": 1, "type": "ack", "body": {"job_id": "j", "attempt": 1.5}}, "error": "wrong_type"},
+  {"name": "attempt_is_bool", "message": {"v": 1, "type": "ack", "body": {"job_id": "j", "attempt": true}}, "error": "wrong_type"},
+  {"name": "attempt_is_negative", "message": {"v": 1, "type": "ack", "body": {"job_id": "j", "attempt": -1}}, "error": "wrong_type"},
+  {"name": "image_pulled_is_string", "message": {"v": 1, "type": "started", "body": {"job_id": "j", "attempt": 1, "image_pulled": "yes"}}, "error": "wrong_type"},
+  {"name": "cpu_percent_is_string", "message": {"v": 1, "type": "heartbeat", "body": {"running": 0, "cpu_percent": "3", "mem_free_mb": 1}}, "error": "wrong_type"},
+  {"name": "command_element_not_string", "message": {"v": 1, "type": "assign", "body": {"job_id": "j", "attempt": 1,
+      "spec": {"image": "img", "command": ["echo", 1], "requirements": {"accelerator": "cpu", "min_gpu_mem_mb": 0}, "max_runtime_s": 1}}}, "error": "wrong_type"},
+
+  {"name": "unsupported_version", "message": {"v": 2, "type": "ack", "body": {"job_id": "j", "attempt": 1}}, "error": "unsupported_version"},
+
+  {"name": "empty_job_id", "message": {"v": 1, "type": "ack", "body": {"job_id": "", "attempt": 1}}, "error": "invalid_value"},
+  {"name": "attempt_zero", "message": {"v": 1, "type": "ack", "body": {"job_id": "j", "attempt": 0}}, "error": "invalid_value"},
+  {"name": "attempt_above_uint32", "message": {"v": 1, "type": "ack", "body": {"job_id": "j", "attempt": 4294967296}}, "error": "invalid_value"},
+  {"name": "negative_cpu_percent", "message": {"v": 1, "type": "heartbeat", "body": {"running": 0, "cpu_percent": -1.0, "mem_free_mb": 1}}, "error": "invalid_value"},
+  {"name": "unknown_accelerator", "message": {"v": 1, "type": "hello", "body": {
+      "token": "t", "node_id": "n", "agent_version": "0.1.0",
+      "capabilities": {"cpus": 1, "mem_mb": 1, "accelerator": "tpu", "runtimes": ["docker"]},
+      "slots": 1, "running": []}}, "error": "invalid_value"},
+  {"name": "empty_runtimes", "message": {"v": 1, "type": "hello", "body": {
+      "token": "t", "node_id": "n", "agent_version": "0.1.0",
+      "capabilities": {"cpus": 1, "mem_mb": 1, "accelerator": "cpu", "runtimes": []},
+      "slots": 1, "running": []}}, "error": "invalid_value"},
+  {"name": "zero_slots", "message": {"v": 1, "type": "hello", "body": {
+      "token": "t", "node_id": "n", "agent_version": "0.1.0",
+      "capabilities": {"cpus": 1, "mem_mb": 1, "accelerator": "cpu", "runtimes": ["docker"]},
+      "slots": 0, "running": []}}, "error": "invalid_value"},
+  {"name": "finished_both_exit_code_and_error", "message": {"v": 1, "type": "finished", "body": {
+      "job_id": "j", "attempt": 1, "exit_code": 1, "error": "x", "run_ms": 1}}, "error": "invalid_value"},
+  {"name": "finished_neither_exit_code_nor_error", "message": {"v": 1, "type": "finished", "body": {
+      "job_id": "j", "attempt": 1, "run_ms": 1}}, "error": "invalid_value"},
+  {"name": "empty_command", "message": {"v": 1, "type": "assign", "body": {"job_id": "j", "attempt": 1,
+      "spec": {"image": "img", "command": [], "requirements": {"accelerator": "cpu", "min_gpu_mem_mb": 0}, "max_runtime_s": 1}}}, "error": "invalid_value"}
+]

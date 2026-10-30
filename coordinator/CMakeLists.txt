@@ -33,12 +33,17 @@ if(_san_flags)
     target_link_options(orch_options INTERFACE ${_san_flags})
 endif()
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 # Core library: everything except main(), so tests link the same code the binary runs.
 add_library(orch_core
     src/metrics.cpp
+    src/protocol.cpp
     src/version.cpp)
 target_include_directories(orch_core PUBLIC include)
-target_link_libraries(orch_core PUBLIC orch_options)
+target_link_libraries(orch_core
+    PUBLIC orch_options
+    PRIVATE nlohmann_json::nlohmann_json)  # JSON stays out of our public headers
 
 add_executable(coordinator src/main.cpp)
 target_link_libraries(coordinator PRIVATE orch_core)

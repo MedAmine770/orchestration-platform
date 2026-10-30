@@ -1,0 +1,69 @@
+[
+  {
+    "name": "hello_full",
+    "message": {"v": 1, "type": "hello", "body": {
+      "token": "test-token", "node_id": "sim-cuda-1", "agent_version": "0.1.0",
+      "capabilities": {"cpus": 8, "mem_mb": 16384, "accelerator": "cuda",
+                       "gpu_name": "RTX 4090 (simulated)", "gpu_mem_mb": 24576,
+                       "runtimes": ["docker"]},
+      "slots": 2,
+      "running": [{"job_id": "0f8a3c2e-job", "attempt": 3}]}}
+  },
+  {
+    "name": "hello_minimal_cpu_no_gpu_fields",
+    "message": {"v": 1, "type": "hello", "body": {
+      "token": "test-token", "node_id": "cpu-1", "agent_version": "0.1.0",
+      "capabilities": {"cpus": 4, "mem_mb": 8192, "accelerator": "cpu",
+                       "runtimes": ["docker", "process"]},
+      "slots": 1, "running": []}}
+  },
+  {
+    "name": "welcome",
+    "message": {"v": 1, "type": "welcome", "body": {"heartbeat_interval_ms": 1000}}
+  },
+  {
+    "name": "heartbeat",
+    "message": {"v": 1, "type": "heartbeat", "body": {"running": 1, "cpu_percent": 37.5, "mem_free_mb": 2048}}
+  },
+  {
+    "name": "assign",
+    "message": {"v": 1, "type": "assign", "body": {
+      "job_id": "job-1", "attempt": 1,
+      "spec": {"image": "python:3.12-slim", "command": ["python", "-c", "print(42)"],
+               "requirements": {"accelerator": "cpu", "min_gpu_mem_mb": 0},
+               "max_runtime_s": 600}}}
+  },
+  {
+    "name": "ack",
+    "message": {"v": 1, "type": "ack", "body": {"job_id": "job-1", "attempt": 1}}
+  },
+  {
+    "name": "reject",
+    "message": {"v": 1, "type": "reject", "body": {"job_id": "job-1", "attempt": 2, "reason": "runtime unavailable: docker"}}
+  },
+  {
+    "name": "started",
+    "message": {"v": 1, "type": "started", "body": {"job_id": "job-1", "attempt": 1, "image_pulled": true}}
+  },
+  {
+    "name": "finished_exit_code",
+    "message": {"v": 1, "type": "finished", "body": {"job_id": "job-1", "attempt": 1, "exit_code": 0, "run_ms": 1532}}
+  },
+  {
+    "name": "finished_negative_exit_code",
+    "message": {"v": 1, "type": "finished", "body": {"job_id": "job-1", "attempt": 1, "exit_code": -9, "run_ms": 12}}
+  },
+  {
+    "name": "finished_error",
+    "message": {"v": 1, "type": "finished", "body": {"job_id": "job-1", "attempt": 1, "error": "image not found", "run_ms": 0}}
+  },
+  {
+    "name": "cancel",
+    "message": {"v": 1, "type": "cancel", "body": {"job_id": "job-1", "attempt": 4}}
+  },
+  {
+    "name": "unknown_fields_are_ignored",
+    "message": {"v": 1, "type": "ack", "trace": "abc", "body": {"job_id": "job-1", "attempt": 1, "future_field": {"x": 1}}},
+    "canonical": {"v": 1, "type": "ack", "body": {"job_id": "job-1", "attempt": 1}}
+  }
+]

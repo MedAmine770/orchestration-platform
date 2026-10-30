@@ -287,8 +287,9 @@ One WebSocket per worker; text frames, one JSON object each:
 | W→C | `finished` | `job_id`, `attempt`, `exit_code` or `error`, durations |
 | C→W | `cancel` | `job_id`, `attempt` |
 
-Rules: `v` is checked on `hello`; unknown fields are ignored (forward compatible);
-unknown types are logged and counted. JSON is used because control messages are small
+Rules: `v` is checked on every message; unknown fields are ignored (forward
+compatible); unknown types are logged and ignored. The exact field rules, error
+codes and shared test vectors are in [`proto/PROTOCOL.md`](../proto/PROTOCOL.md). JSON is used because control messages are small
 and infrequent, and readability helps debugging; a binary format is not justified at
 this message rate.
 

@@ -1,0 +1,4 @@
+[
+  {"name": "future_message_type", "message": {"v": 1, "type": "drain", "body": {"deadline_ms": 5000}}, "type": "drain"},
+  {"name": "unknown_type_body_not_validated", "message": {"v": 1, "type": "metrics_push", "body": {}}, "type": "metrics_push"}
+]
