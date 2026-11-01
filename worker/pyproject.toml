@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orch-worker"
+version = "0.1.0"
+description = "Worker agent for the orchestration platform"
+requires-python = ">=3.11"
+dependencies = [
+    "psutil==7.0.0",
+    "websockets==15.0.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5"]
+
+[project.scripts]
+orch-worker = "orch_worker.__main__:main"
+
+[tool.setuptools]
+packages = ["orch_worker"]

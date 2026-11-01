@@ -1,5 +1,6 @@
 [
   {"name": "not_json", "raw": "{\"v\": 1, \"type\": ", "error": "malformed_json"},
+  {"name": "nan_literal", "raw": "{\"v\": 1, \"type\": \"heartbeat\", \"body\": {\"running\": 0, \"cpu_percent\": NaN, \"mem_free_mb\": 1}}", "error": "malformed_json"},
   {"name": "envelope_is_array", "message": [1, 2, 3], "error": "not_object"},
   {"name": "body_is_string", "message": {"v": 1, "type": "ack", "body": "x"}, "error": "not_object"},
 

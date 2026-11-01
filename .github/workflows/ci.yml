@@ -20,6 +20,17 @@ jobs:
           find coordinator \( -name build -prune \) -o \( -name '*.cpp' -o -name '*.hpp' \) -print \
             | xargs clang-format --dry-run --Werror
 
+  worker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e "worker[test]"
+      # Includes the shared protocol vectors, so codec drift fails here.
+      - run: python -m pytest -q worker/tests
+
   coordinator:
     name: coordinator (${{ matrix.os }}, ${{ matrix.preset }})
     runs-on: ${{ matrix.os }}

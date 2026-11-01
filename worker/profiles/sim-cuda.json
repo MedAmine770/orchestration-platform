@@ -1,0 +1,6 @@
+{
+  "accelerator": "cuda",
+  "gpu_name": "NVIDIA RTX 4090 (simulated)",
+  "gpu_mem_mb": 24576,
+  "runtimes": ["docker"]
+}
