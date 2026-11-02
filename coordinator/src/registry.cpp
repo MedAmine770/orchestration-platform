@@ -51,7 +51,11 @@ void Registry::mark_suspect(const NodeId& id) {
 
 void Registry::place(const NodeId& node, const JobId& job) { nodes_.at(node).jobs.insert(job); }
 
-void Registry::release(const NodeId& node, const JobId& job) { nodes_.at(node).jobs.erase(job); }
+void Registry::release(const NodeId& node, const JobId& job) {
+    // The node may be unknown: a job restored after a restart that its node
+    // never reclaimed was never placed on it in this process.
+    if (Node* n = find(node)) n->jobs.erase(job);
+}
 
 Node* Registry::find(const NodeId& id) {
     auto it = nodes_.find(id);

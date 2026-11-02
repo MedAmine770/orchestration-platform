@@ -55,7 +55,8 @@ class Registry {
     bool heartbeat(const NodeId& id, Clock::time_point now);
     void mark_suspect(const NodeId& id);
 
-    // Bookkeeping for jobs placed on a node; the node must exist.
+    // Bookkeeping for jobs placed on a node. place() needs a known node;
+    // release() ignores an unknown one.
     void place(const NodeId& node, const JobId& job);
     void release(const NodeId& node, const JobId& job);
 

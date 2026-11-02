@@ -50,6 +50,9 @@ struct Attempt {
     std::optional<Clock::duration> dispatch_latency;  // assign sent → ack
     std::optional<Clock::duration> start_latency;     // QUEUED → started
     std::optional<bool> image_pulled;
+    // In flight across a coordinator restart: its latencies would include the
+    // outage, so none are recorded for it.
+    bool spans_restart = false;
     // Empty while current. Then: rejected, ack_timeout, start_timeout,
     // node_dead, succeeded, failed or cancelled.
     std::string outcome;
@@ -74,6 +77,15 @@ struct Job {
     std::optional<Clock::time_point> deadline;  // T_ack in ASSIGNED, T_start in STARTING
     std::vector<Attempt> attempts;
     std::uint64_t seq = 0;  // submission order, for the FIFO scan
+};
+
+// One state change, for the durable history (the store's job_events table).
+struct Transition {
+    JobId job_id;
+    JobState state = JobState::queued;
+    std::uint32_t attempt = 0;
+    std::optional<NodeId> node;
+    std::string reason;
 };
 
 struct SendAssign {
@@ -101,6 +113,9 @@ struct JobsConfig {
     // Failure detection (DESIGN.md §10), measured from a node's last heartbeat.
     Clock::duration suspect_after = std::chrono::seconds(3);  // no new placements
     Clock::duration dead_after = std::chrono::seconds(5);     // its jobs are requeued
+    // After a coordinator restart: how long in-flight jobs wait for their
+    // worker to reclaim them before they are requeued (DESIGN.md §8.3).
+    Clock::duration recovery_window = std::chrono::seconds(10);
 };
 
 struct Submission {
@@ -150,6 +165,22 @@ class Jobs {
     void tick(Clock::time_point now);
     std::optional<Clock::time_point> next_deadline() const;
 
+    // After a coordinator restart (DESIGN.md §8.3): rebuilds the table from its
+    // durable records. Waiting jobs are queued again. In-flight jobs wait up to
+    // recovery_window for their worker to reclaim them through hello.running;
+    // tick() requeues the rest once the window closes.
+    void restore(std::vector<Job> jobs, Clock::time_point now);
+
+    // Jobs changed since the last call, and the transitions that changed them.
+    // The caller makes these durable before sending take_effects()' messages
+    // (DESIGN.md §8.2). The pointers are valid until the next event.
+    struct Changes {
+        std::vector<const Job*> jobs;
+        std::vector<Transition> transitions;
+        bool empty() const noexcept { return jobs.empty() && transitions.empty(); }
+    };
+    Changes take_changes();
+
     // Messages to send, in order. Empties the queue.
     std::vector<Effect> take_effects() { return std::exchange(effects_, {}); }
 
@@ -171,6 +202,7 @@ class Jobs {
     void finish(Job& job, JobState terminal, std::string reason);
     void fail_node(const NodeId& id, Clock::time_point now);
     void check_heartbeats(Clock::time_point now);
+    void check_recovery(Clock::time_point now);
     void reevaluate_waiting(Clock::time_point now);
     void schedule(Clock::time_point now);
     bool has_eligible_node(const Job& job) const;
@@ -189,6 +221,12 @@ class Jobs {
     std::set<JobId> timed_;  // ASSIGNED or STARTING
     std::vector<Effect> effects_;
     std::uint64_t next_seq_ = 0;
+
+    std::set<JobId> dirty_;                // changed since take_changes()
+    std::vector<Transition> transitions_;  // since take_changes()
+    // In-flight jobs restored after a restart, not yet reclaimed by their
+    // worker, with the end of their recovery window.
+    std::map<JobId, Clock::time_point> recovering_;
 };
 
 }  // namespace orch

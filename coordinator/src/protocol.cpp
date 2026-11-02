@@ -40,9 +40,7 @@ std::string as_string(const json& v, const std::string& path) {
 
 Accelerator as_accelerator(const json& v, const std::string& path) {
     const std::string s = as_string(v, path);
-    if (s == "cpu") return Accelerator::cpu;
-    if (s == "cuda") return Accelerator::cuda;
-    if (s == "mps") return Accelerator::mps;
+    if (const auto a = accelerator_from(s)) return *a;
     fail(ErrorCode::invalid_value, path + " has unknown accelerator '" + s + "'");
 }
 
@@ -298,6 +296,16 @@ struct BodyEncoder {
 };
 
 }  // namespace
+
+std::string_view to_string(Accelerator accelerator) noexcept { return name(accelerator); }
+std::string_view to_string(Runtime runtime) noexcept { return name(runtime); }
+
+std::optional<Accelerator> accelerator_from(std::string_view s) noexcept {
+    if (s == "cpu") return Accelerator::cpu;
+    if (s == "cuda") return Accelerator::cuda;
+    if (s == "mps") return Accelerator::mps;
+    return std::nullopt;
+}
 
 std::string_view to_string(ErrorCode code) noexcept {
     switch (code) {

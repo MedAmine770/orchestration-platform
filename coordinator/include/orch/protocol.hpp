@@ -136,6 +136,11 @@ enum class ErrorCode {
 // The code's wire name, as used in proto/vectors/invalid.json.
 std::string_view to_string(ErrorCode code) noexcept;
 
+// Wire names: "cpu" / "cuda" / "mps", "docker" / "process".
+std::string_view to_string(Accelerator accelerator) noexcept;
+std::string_view to_string(Runtime runtime) noexcept;
+std::optional<Accelerator> accelerator_from(std::string_view name) noexcept;
+
 class ProtocolError : public std::runtime_error {
   public:
     ProtocolError(ErrorCode code, const std::string& detail)

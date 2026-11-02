@@ -43,6 +43,7 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 add_library(orch_core
     src/api.cpp
     src/coordinator_metrics.cpp
+    src/job_record.cpp
     src/jobs.cpp
     src/metrics.cpp
     src/net/http_session.cpp

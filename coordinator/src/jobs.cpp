@@ -1,5 +1,6 @@
 #include "orch/jobs.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -86,10 +87,22 @@ void Jobs::node_joined(const NodeId& id, protocol::Capabilities capabilities, st
     std::set<JobId> reported;
     for (const protocol::JobRef& ref : running) {
         const auto it = jobs_.find(ref.job_id);
-        if (it != jobs_.end() && it->second.node == id && it->second.attempt == ref.attempt) {
-            reported.insert(ref.job_id);
-        } else {
+        if (it == jobs_.end() || it->second.node != id || it->second.attempt != ref.attempt) {
             effects_.push_back(SendCancel{id, protocol::Cancel{ref}});
+            continue;
+        }
+        Job& job = it->second;
+        reported.insert(job.id);
+        if (recovering_.erase(job.id) > 0) {
+            // Reclaimed after a coordinator restart (§8.3): placed here again.
+            registry_.place(id, job.id);
+            if (job.state == JobState::assigned) {
+                // The worker only reports jobs it accepted: its ack was lost.
+                job.deadline = now + config_.start_timeout;
+                set_state(job, JobState::starting);
+            } else if (job.state == JobState::starting) {
+                job.deadline = now + config_.start_timeout;
+            }
         }
     }
     // A job placed here that the worker doesn't report was lost with its
@@ -172,9 +185,10 @@ MessageResult Jobs::on_ack(const NodeId& from, const protocol::Ack& msg, Clock::
     if (job == nullptr) return MessageResult::stale;
     if (job->state != JobState::assigned) return MessageResult::ignored;
 
-    const auto latency = now - job->attempts.back().assigned_at;
-    job->attempts.back().dispatch_latency = latency;
-    metrics_.dispatch_latency.observe(latency);
+    if (Attempt& attempt = job->attempts.back(); !attempt.spans_restart) {
+        attempt.dispatch_latency = now - attempt.assigned_at;
+        metrics_.dispatch_latency.observe(*attempt.dispatch_latency);
+    }
     job->deadline = now + config_.start_timeout;
     set_state(*job, JobState::starting);
     return MessageResult::accepted;
@@ -203,12 +217,13 @@ MessageResult Jobs::on_started(const NodeId& from, const protocol::Started& msg,
     if (job == nullptr) return MessageResult::stale;
     if (job->state != JobState::starting) return MessageResult::ignored;
 
-    const auto latency = now - job->queued_at;
     Attempt& attempt = job->attempts.back();
-    attempt.start_latency = latency;
     attempt.image_pulled = msg.image_pulled;
-    (msg.image_pulled ? metrics_.start_latency_pulled : metrics_.start_latency_cached)
-        .observe(latency);
+    if (!attempt.spans_restart) {
+        attempt.start_latency = now - job->queued_at;
+        (msg.image_pulled ? metrics_.start_latency_pulled : metrics_.start_latency_cached)
+            .observe(*attempt.start_latency);
+    }
     job->deadline.reset();
     set_state(*job, JobState::running);
     return MessageResult::accepted;
@@ -240,6 +255,7 @@ MessageResult Jobs::on_finished(const NodeId& from, const protocol::Finished& ms
 
 void Jobs::tick(Clock::time_point now) {
     check_heartbeats(now);
+    check_recovery(now);
     const std::set<JobId> timed = timed_;  // copy: requeueing edits timed_
     for (const JobId& id : timed) {
         Job& job = jobs_.at(id);
@@ -257,6 +273,7 @@ std::optional<Clock::time_point> Jobs::next_deadline() const {
         if (!next || d < *next) next = d;
     };
     for (const JobId& id : timed_) consider(*jobs_.at(id).deadline);
+    for (const auto& [id, until] : recovering_) consider(until);
     for (const auto& [id, node] : registry_.nodes()) {
         if (node.health == Health::alive) consider(node.last_heartbeat + config_.suspect_after);
         if (node.health == Health::suspect) consider(node.last_heartbeat + config_.dead_after);
@@ -276,6 +293,8 @@ const Job* Jobs::find(const JobId& id) const {
 void Jobs::enter(Job& job, JobState state) {
     job.state = state;
     const auto& id = job.id;
+    dirty_.insert(id);
+    transitions_.push_back(Transition{id, state, job.attempt, job.node, job.reason});
     switch (state) {
         case JobState::queued:
             queue_.emplace(job.seq, id);
@@ -324,6 +343,7 @@ void Jobs::enqueue(Job& job, Clock::time_point now) { set_state(job, waiting_sta
 void Jobs::place(Job& job, const NodeId& node, Clock::time_point now) {
     ++job.attempt;
     job.node = node;
+    job.reason.clear();  // the previous attempt's reason stays in the history
     job.deadline = now + config_.ack_timeout;
     Attempt& attempt = job.attempts.emplace_back();
     attempt.number = job.attempt;
@@ -342,6 +362,7 @@ void Jobs::unplace(Job& job, std::string_view outcome, bool send_cancel) {
     if (send_cancel)
         effects_.push_back(SendCancel{*job.node, protocol::Cancel{{job.id, job.attempt}}});
     registry_.release(*job.node, job.id);
+    recovering_.erase(job.id);
     job.attempts.back().outcome = outcome;
     job.node.reset();
     job.deadline.reset();
@@ -366,7 +387,8 @@ void Jobs::infrastructure_failure(Job& job, std::string_view reason, bool send_c
 void Jobs::finish(Job& job, JobState terminal, std::string reason) {
     // A job still on a live node is told to stop (only cancel reaches here
     // with work possibly running; a finished message means it already ended).
-    const bool on_live_node = job.node && registry_.find(*job.node)->health != Health::dead;
+    const Node* node = job.node ? registry_.find(*job.node) : nullptr;
+    const bool on_live_node = node != nullptr && node->health != Health::dead;
     unplace(job, to_string(terminal), terminal == JobState::cancelled && on_live_node);
     job.reason = std::move(reason);
     set_state(job, terminal);
@@ -408,6 +430,55 @@ bool Jobs::any_free_slot() const {
         if (node.health == Health::alive && node.free_slots() > 0) return true;
     }
     return false;
+}
+
+// ---- Durability and restart recovery (DESIGN.md §8) --------------------------
+
+void Jobs::restore(std::vector<Job> restored, Clock::time_point now) {
+    for (Job& r : restored) {
+        next_seq_ = std::max(next_seq_, r.seq + 1);
+        const JobId id = r.id;
+        auto [it, inserted] = jobs_.try_emplace(id, std::move(r));
+        if (!inserted) throw std::invalid_argument("duplicate job id " + id);
+        Job& job = it->second;
+        if (job.idempotency_key) by_idempotency_key_.emplace(*job.idempotency_key, id);
+        job.submitted_at = now;
+        if (is_terminal(job.state)) continue;  // history only: no gauge, no counters
+
+        const bool in_flight = job.state == JobState::assigned || job.state == JobState::starting ||
+                               job.state == JobState::running;
+        if (!in_flight || job.attempts.empty()) {
+            enter(job, waiting_state(job, now));  // nodes reconnect after this
+            continue;
+        }
+        job.attempts.back().spans_restart = true;
+        recovering_[id] = now + config_.recovery_window;
+        if (job.state != JobState::running) job.deadline = now + config_.recovery_window;
+        enter(job, job.state);
+    }
+    // Nothing durable changed: QUEUED vs UNSCHEDULABLE is recomputed on every start.
+    dirty_.clear();
+    transitions_.clear();
+}
+
+Jobs::Changes Jobs::take_changes() {
+    Changes changes;
+    for (const JobId& id : dirty_) changes.jobs.push_back(&jobs_.at(id));
+    changes.transitions = std::exchange(transitions_, {});
+    dirty_.clear();
+    return changes;
+}
+
+void Jobs::check_recovery(Clock::time_point now) {
+    std::vector<JobId> expired;
+    for (const auto& [id, until] : recovering_) {
+        if (until <= now) expired.push_back(id);
+    }
+    for (const JobId& id : expired) {
+        // No worker reclaimed it: handled like a node death. A worker that
+        // shows up later with this attempt is told to cancel it.
+        infrastructure_failure(jobs_.at(id), "node_dead", false, now);
+    }
 }
 
 }  // namespace orch

@@ -5,6 +5,8 @@
 #include <map>
 #include <optional>
 #include <ostream>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -13,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "orch/coordinator_metrics.hpp"
+#include "orch/job_record.hpp"
 #include "orch/metrics.hpp"
 #include "orch/registry.hpp"
 #include "orch/scheduler.hpp"
@@ -540,4 +543,185 @@ TEST_F(HeartbeatTest, ANodeDeclaredDeadThatComesBackHasItsOldAttemptCancelled) {
     EXPECT_EQ(health("a"), orch::Health::alive);
     EXPECT_EQ(jobs.take_effects(), (std::vector<Effect>{SendCancel{"a", {{"j1", 1}}}}));
     EXPECT_EQ(job("j1").node, "b");
+}
+
+// ---- Durability and restart recovery (DESIGN.md §8) ---------------------------
+
+namespace {
+
+// One coordinator's worth of core state. Recovery tests build a "before"
+// world, then restore its jobs (through their durable form) into "after".
+struct World {
+    orch::metrics::Registry metrics_registry;
+    orch::CoordinatorMetrics metrics{metrics_registry};
+    orch::Registry registry{metrics};
+    orch::LeastLoaded policy;
+    orch::Jobs jobs{orch::JobsConfig{}, registry, policy, metrics};
+
+    const Job& job(const std::string& id) { return *jobs.find(id); }
+    void run(const std::string& node, const std::string& id, Clock::time_point at) {
+        jobs.on_ack(node, {JobRef{id, 1}}, at);
+        jobs.on_started(node, {JobRef{id, 1}, false}, at);
+    }
+};
+
+// What a restarted coordinator sees: every job, encoded and decoded again.
+void restart(World& before, World& after, Clock::time_point now) {
+    std::vector<Job> restored;
+    for (const auto& [id, job] : before.jobs.jobs()) {
+        restored.push_back(orch::decode_job(orch::encode_job(job)));
+    }
+    after.jobs.restore(std::move(restored), now);
+}
+
+}  // namespace
+
+TEST(JobRecord, RoundTripsEveryDurableField) {
+    World w;
+    w.jobs.node_joined("a", caps(), 1, Clock::time_point{});
+    auto sub = submission("j1", spec(Accelerator::cuda), "key-1");
+    sub.max_retries = 5;
+    w.jobs.node_joined("gpu", caps(Accelerator::cuda), 1, Clock::time_point{});
+    w.jobs.submit(std::move(sub), Clock::time_point{});
+    w.jobs.on_reject("gpu", {JobRef{"j1", 1}, "no"}, Clock::time_point{});
+
+    const Job& original = w.job("j1");
+    const Job copy = orch::decode_job(orch::encode_job(original));
+    EXPECT_EQ(copy.id, original.id);
+    EXPECT_EQ(copy.seq, original.seq);
+    EXPECT_EQ(copy.idempotency_key, "key-1");
+    EXPECT_EQ(copy.spec, original.spec);
+    EXPECT_EQ(copy.max_retries, 5u);
+    EXPECT_EQ(copy.state, original.state);
+    EXPECT_EQ(copy.reason, original.reason);
+    EXPECT_EQ(copy.attempt, 1u);
+    EXPECT_EQ(copy.rejected_by, std::set<orch::NodeId>{"gpu"});
+    ASSERT_EQ(copy.attempts.size(), 1u);
+    EXPECT_EQ(copy.attempts[0].outcome, "rejected");
+    EXPECT_EQ(copy.attempts[0].queue_wait, original.attempts[0].queue_wait);
+    EXPECT_THROW(orch::decode_job(R"({"v": 2})"), std::invalid_argument);
+}
+
+TEST(Recovery, RestoreRebuildsTheTableTheIndexesAndTheGauges) {
+    const Clock::time_point t0{};
+    World before;
+    before.jobs.node_joined("a", caps(), 2, t0);
+    before.jobs.submit(submission("done", spec(), "nightly"), t0);
+    before.run("a", "done", t0);
+    before.jobs.on_finished("a", {JobRef{"done", 1}, 0, std::nullopt, 1}, t0);
+    before.jobs.submit(submission("running", spec()), t0);
+    before.run("a", "running", t0);
+    before.jobs.submit(submission("gpu", spec(Accelerator::cuda)), t0);  // unschedulable
+
+    World after;
+    restart(before, after, t0 + 1h);
+    EXPECT_EQ(after.job("done").state, JobState::succeeded);
+    EXPECT_EQ(after.job("running").state, JobState::running);  // waiting to be reclaimed
+    EXPECT_EQ(after.job("gpu").state, JobState::unschedulable);
+    EXPECT_EQ(after.metrics.jobs("running").value(), 1);
+    EXPECT_EQ(after.metrics.jobs("unschedulable").value(), 1);
+    EXPECT_EQ(after.metrics.jobs_finished("succeeded").value(), 0u);  // history, not news
+    EXPECT_EQ(after.jobs.next_deadline(), t0 + 1h + 10s);             // the recovery window
+    EXPECT_TRUE(after.jobs.take_changes().empty());                   // nothing new to persist
+
+    // Idempotency and submission order survive.
+    EXPECT_FALSE(after.jobs.submit(submission("again", spec(), "nightly"), t0 + 1h).created);
+    const auto fresh = after.jobs.submit(submission("fresh", spec()), t0 + 1h);
+    EXPECT_GT(fresh.job.seq, after.job("gpu").seq);
+}
+
+TEST(Recovery, AReclaimedJobKeepsItsAttemptAndRecordsNoLatencyAcrossTheOutage) {
+    const Clock::time_point t0{};
+    World before;
+    before.jobs.node_joined("a", caps(), 2, t0);
+    before.jobs.submit(submission("running", spec()), t0);
+    before.run("a", "running", t0);
+    before.jobs.submit(submission("acked-lost", spec()), t0);  // ASSIGNED: its ack was lost
+
+    World after;
+    const Clock::time_point t1 = t0 + 1h;
+    restart(before, after, t1);
+    after.jobs.node_joined("a", caps(), 2, t1 + 1s, {{"running", 1}, {"acked-lost", 1}});
+    EXPECT_EQ(after.jobs.take_effects(), std::vector<Effect>{});  // nothing cancelled or moved
+    EXPECT_EQ(after.job("running").state, JobState::running);
+    EXPECT_EQ(after.job("running").attempt, 1u);
+    EXPECT_EQ(after.job("running").retries_used, 0u);
+    // Both are placed on a again: its 2 slots are taken, so nothing else lands there.
+    EXPECT_EQ(after.registry.find("a")->free_slots(), 0u);
+    // A worker only reports jobs it accepted, so a reclaimed ASSIGNED job is acked.
+    EXPECT_EQ(after.job("acked-lost").state, JobState::starting);
+
+    after.jobs.on_started("a", {JobRef{"acked-lost", 1}, false}, t1 + 2s);
+    after.jobs.on_finished("a", {JobRef{"running", 1}, 0, std::nullopt, 1}, t1 + 2s);
+    EXPECT_EQ(after.job("running").state, JobState::succeeded);
+    EXPECT_EQ(after.job("acked-lost").attempts.at(0).start_latency, std::nullopt);
+    EXPECT_EQ(after.metrics.start_latency_cached.snapshot().count, 0u);
+
+    after.jobs.heartbeat("a", t1 + 1h - 1s);  // a stays healthy
+    after.jobs.tick(t1 + 1h);                 // the window has long closed: nothing is requeued
+    EXPECT_EQ(after.job("acked-lost").state, JobState::running);
+}
+
+TEST(Recovery, AnUnclaimedJobIsRequeuedWhenTheWindowCloses) {
+    const Clock::time_point t0{};
+    World before;
+    before.jobs.node_joined("a", caps(), 1, t0);
+    before.jobs.submit(submission("j1", spec()), t0);
+    before.run("a", "j1", t0);
+
+    World after;
+    const Clock::time_point t1 = t0 + 1h;
+    restart(before, after, t1);
+    after.jobs.node_joined("b", caps(), 1, t1);  // a never comes back
+    after.jobs.heartbeat("b", t1 + 9s);
+    after.jobs.tick(t1 + 10s - 1ns);
+    EXPECT_EQ(after.job("j1").state, JobState::running);
+
+    after.jobs.tick(t1 + 10s);
+    EXPECT_EQ(after.job("j1").node, "b");
+    EXPECT_EQ(after.job("j1").attempt, 2u);
+    EXPECT_EQ(after.job("j1").retries_used, 1u);
+    EXPECT_EQ(after.job("j1").attempts.at(0).outcome, "node_dead");
+
+    // a turns up late, still running attempt 1: told to cancel it.
+    after.jobs.take_effects();
+    after.jobs.node_joined("a", caps(), 1, t1 + 11s, {{"j1", 1}});
+    EXPECT_EQ(after.jobs.take_effects(), (std::vector<Effect>{SendCancel{"a", {{"j1", 1}}}}));
+}
+
+TEST(Recovery, AResultReplayedAfterReconnectCompletesARecoveringJob) {
+    const Clock::time_point t0{};
+    World before;
+    before.jobs.node_joined("a", caps(), 1, t0);
+    before.jobs.submit(submission("j1", spec()), t0);
+    before.run("a", "j1", t0);
+
+    // j1 finished while the coordinator was down. The worker reconnects (no
+    // longer running it) and resends the finished message it couldn't deliver.
+    World after;
+    const Clock::time_point t1 = t0 + 1h;
+    restart(before, after, t1);
+    after.jobs.node_joined("a", caps(), 1, t1, {});
+    EXPECT_EQ(after.jobs.on_finished("a", {JobRef{"j1", 1}, 0, std::nullopt, 1}, t1),
+              MessageResult::accepted);
+    EXPECT_EQ(after.job("j1").state, JobState::succeeded);
+    after.jobs.heartbeat("a", t1 + 9s);
+    after.jobs.tick(t1 + 10s);  // no longer recovering: not requeued
+    EXPECT_EQ(after.job("j1").retries_used, 0u);
+}
+
+TEST(Recovery, TakeChangesReportsChangedJobsAndTheirTransitions) {
+    World w;
+    w.jobs.submit(submission("j1", spec()), Clock::time_point{});
+    w.jobs.node_joined("a", caps(), 1, Clock::time_point{});
+    const auto changes = w.jobs.take_changes();
+    ASSERT_EQ(changes.jobs.size(), 1u);
+    EXPECT_EQ(changes.jobs[0]->id, "j1");
+    ASSERT_EQ(changes.transitions.size(), 3u);
+    EXPECT_EQ(changes.transitions[0].state, JobState::unschedulable);
+    EXPECT_EQ(changes.transitions[1].state, JobState::queued);
+    EXPECT_EQ(changes.transitions[2].state, JobState::assigned);
+    EXPECT_EQ(changes.transitions[2].attempt, 1u);
+    EXPECT_EQ(changes.transitions[2].node, "a");
+    EXPECT_TRUE(w.jobs.take_changes().empty());
 }

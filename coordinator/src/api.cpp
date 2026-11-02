@@ -26,18 +26,6 @@ struct BadRequest : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-std::string_view accelerator_name(Accelerator a) {
-    switch (a) {
-        case Accelerator::cpu:
-            return "cpu";
-        case Accelerator::cuda:
-            return "cuda";
-        case Accelerator::mps:
-            return "mps";
-    }
-    return "unknown";
-}
-
 ApiResponse respond(unsigned status, const json& body) { return {status, body.dump() + "\n"}; }
 ApiResponse error(unsigned status, std::string message) {
     return respond(status, json{{"error", std::move(message)}});
@@ -102,16 +90,10 @@ Submission parse_submission(std::string_view body) {
     if (const auto reqs = req.find("requirements"); reqs != req.end()) {
         if (!reqs->is_object()) throw BadRequest("requirements must be an object");
         if (const auto acc = reqs->find("accelerator"); acc != reqs->end()) {
-            const std::string name = acc->is_string() ? acc->get<std::string>() : "";
-            if (name == "cpu") {
-                s.spec.requirements.accelerator = Accelerator::cpu;
-            } else if (name == "cuda") {
-                s.spec.requirements.accelerator = Accelerator::cuda;
-            } else if (name == "mps") {
-                s.spec.requirements.accelerator = Accelerator::mps;
-            } else {
-                throw BadRequest("requirements.accelerator must be cpu, cuda or mps");
-            }
+            const auto a =
+                protocol::accelerator_from(acc->is_string() ? acc->get<std::string>() : "");
+            if (!a) throw BadRequest("requirements.accelerator must be cpu, cuda or mps");
+            s.spec.requirements.accelerator = *a;
         }
         s.spec.requirements.min_gpu_mem_mb =
             uint_field(*reqs, "min_gpu_mem_mb", 0, 0, std::numeric_limits<std::uint64_t>::max());
@@ -152,7 +134,7 @@ json job_json(const Job& job) {
         {"image", job.spec.image},
         {"command", job.spec.command},
         {"requirements",
-         {{"accelerator", accelerator_name(job.spec.requirements.accelerator)},
+         {{"accelerator", protocol::to_string(job.spec.requirements.accelerator)},
           {"min_gpu_mem_mb", job.spec.requirements.min_gpu_mem_mb}}},
         {"max_runtime_s", job.spec.max_runtime_s},
         {"max_retries", job.max_retries},
@@ -170,7 +152,7 @@ json node_json(const Node& node) {
     const auto& c = node.capabilities;
     json runtimes = json::array();
     for (const auto r : c.runtimes) {
-        runtimes.push_back(r == protocol::Runtime::docker ? "docker" : "process");
+        runtimes.push_back(protocol::to_string(r));
     }
     return {
         {"node_id", node.id},
@@ -181,7 +163,7 @@ json node_json(const Node& node) {
         {"capabilities",
          {{"cpus", c.cpus},
           {"mem_mb", c.mem_mb},
-          {"accelerator", accelerator_name(c.accelerator)},
+          {"accelerator", protocol::to_string(c.accelerator)},
           {"gpu_name", optional_json(c.gpu_name)},
           {"gpu_mem_mb", optional_json(c.gpu_mem_mb)},
           {"runtimes", std::move(runtimes)}}},
