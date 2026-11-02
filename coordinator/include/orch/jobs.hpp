@@ -44,9 +44,11 @@ struct Attempt {
     std::uint32_t number = 0;
     NodeId node;
     Clock::time_point assigned_at;
-    // Both measured from the job's latest entry into QUEUED (DESIGN.md §11).
-    std::optional<Clock::duration> dispatch_latency;  // → ack
-    std::optional<Clock::duration> start_latency;     // → started
+    // DESIGN.md §11. Queue wait and start latency start at the job's latest
+    // entry into QUEUED; dispatch starts when the assign is sent.
+    std::optional<Clock::duration> queue_wait;        // QUEUED → assign sent
+    std::optional<Clock::duration> dispatch_latency;  // assign sent → ack
+    std::optional<Clock::duration> start_latency;     // QUEUED → started
     std::optional<bool> image_pulled;
     // Empty while current. Then: rejected, ack_timeout, start_timeout,
     // node_dead, succeeded, failed or cancelled.
@@ -84,12 +86,21 @@ struct SendCancel {
     protocol::Cancel message;
     bool operator==(const SendCancel&) const = default;
 };
-using Effect = std::variant<SendAssign, SendCancel>;
+// Close the node's connection: it was declared dead while its socket stayed
+// open (a hung process or a half-open TCP connection).
+struct Disconnect {
+    NodeId node;
+    bool operator==(const Disconnect&) const = default;
+};
+using Effect = std::variant<SendAssign, SendCancel, Disconnect>;
 
 struct JobsConfig {
     Clock::duration ack_timeout = std::chrono::seconds(2);
     Clock::duration start_timeout = std::chrono::seconds(120);
     std::uint32_t default_max_retries = 2;
+    // Failure detection (DESIGN.md §10), measured from a node's last heartbeat.
+    Clock::duration suspect_after = std::chrono::seconds(3);  // no new placements
+    Clock::duration dead_after = std::chrono::seconds(5);     // its jobs are requeued
 };
 
 struct Submission {
@@ -119,10 +130,13 @@ class Jobs {
     Submitted submit(Submission submission, Clock::time_point now);
     CancelResult cancel(const JobId& id, Clock::time_point now);
 
+    // On hello. `running` is what the worker says it is still running; it is
+    // reconciled against what the coordinator placed there (DESIGN.md §7.3).
     void node_joined(const NodeId& id, protocol::Capabilities capabilities, std::uint32_t slots,
-                     Clock::time_point now);
-    // Connection lost or declared dead: its jobs fail as infrastructure failures.
+                     Clock::time_point now, const std::vector<protocol::JobRef>& running = {});
+    // The connection closed: its jobs fail as infrastructure failures.
     void node_lost(const NodeId& id, Clock::time_point now);
+    void heartbeat(const NodeId& id, Clock::time_point now);
 
     MessageResult on_ack(const NodeId& from, const protocol::Ack& msg, Clock::time_point now);
     MessageResult on_reject(const NodeId& from, const protocol::Reject& msg, Clock::time_point now);
@@ -131,8 +145,8 @@ class Jobs {
     MessageResult on_finished(const NodeId& from, const protocol::Finished& msg,
                               Clock::time_point now);
 
-    // Fires expired T_ack / T_start timers. The caller arms one timer for
-    // next_deadline() and calls tick() when it fires.
+    // Fires expired T_ack / T_start timers and heartbeat deadlines. The caller
+    // arms one timer for next_deadline() and calls tick() when it fires.
     void tick(Clock::time_point now);
     std::optional<Clock::time_point> next_deadline() const;
 
@@ -155,6 +169,8 @@ class Jobs {
     void infrastructure_failure(Job& job, std::string_view reason, bool send_cancel,
                                 Clock::time_point now);
     void finish(Job& job, JobState terminal, std::string reason);
+    void fail_node(const NodeId& id, Clock::time_point now);
+    void check_heartbeats(Clock::time_point now);
     void reevaluate_waiting(Clock::time_point now);
     void schedule(Clock::time_point now);
     bool has_eligible_node(const Job& job) const;

@@ -27,6 +27,8 @@ constexpr std::string_view kUsage = R"(usage: coordinator [options]
   --heartbeat-interval-ms N heartbeat interval sent to workers (default 1000)
   --ack-timeout-ms N        T_ack: time a worker has to ack an assign (default 2000)
   --start-timeout-ms N      T_start: time from ack to started (default 120000)
+  --suspect-after-ms N      no heartbeat for N ms: no new placements (default 3000)
+  --dead-after-ms N         no heartbeat for N ms: node dead, jobs requeued (default 5000)
   --token-file PATH         read the cluster token from PATH
 
 The cluster token comes from --token-file or the CLUSTER_TOKEN environment
@@ -82,6 +84,11 @@ orch::net::ServerConfig parse_args(int argc, char** argv) {
         } else if (flag == "--start-timeout-ms") {
             config.jobs.start_timeout =
                 std::chrono::milliseconds(parse_number(flag, value, 3'600'000));
+        } else if (flag == "--suspect-after-ms") {
+            config.jobs.suspect_after =
+                std::chrono::milliseconds(parse_number(flag, value, 600'000));
+        } else if (flag == "--dead-after-ms") {
+            config.jobs.dead_after = std::chrono::milliseconds(parse_number(flag, value, 600'000));
         } else if (flag == "--token-file") {
             token_file = value;
         } else {
@@ -89,6 +96,9 @@ orch::net::ServerConfig parse_args(int argc, char** argv) {
         }
     }
 
+    if (config.jobs.suspect_after >= config.jobs.dead_after) {
+        throw std::invalid_argument("--suspect-after-ms must be less than --dead-after-ms");
+    }
     if (!token_file.empty()) {
         config.cluster_token = read_token_file(token_file);
     } else if (const char* env = std::getenv("CLUSTER_TOKEN")) {

@@ -97,5 +97,11 @@ timeout (default 5 s). The coordinator closes the WebSocket with:
 | 1002 | a second `hello`, or a C→W type sent by the worker | e.g. `duplicate hello` |
 | 1009 message too big | a frame over 64 KiB | (sent by the WebSocket layer) |
 | 4000 replaced | another session authenticated with the same `node_id` | `replaced by a newer session` |
+| 4001 declared dead | no heartbeat within the coordinator's dead timeout (default 5 s) while the socket stayed open | `missed heartbeats` |
 
 Close reasons are short ASCII strings; details stay in the coordinator's log.
+
+A worker treats 1008 and 4000 as fatal (retrying can't fix them) and reconnects
+after anything else. After 4001 its jobs have already been requeued; on
+reconnect, `hello.running` lists what it is still running, and the coordinator
+answers each attempt that is no longer current with `cancel`.

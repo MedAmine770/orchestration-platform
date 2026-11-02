@@ -44,8 +44,8 @@ prom_equals() {  # prom_equals QUERY VALUE: an instant query through Prometheus
         | jq -r '.data.result[0].value[1] // empty')" = "$2" ]
 }
 
-dashboard_has_six_panels() {
-    [ "$(curl -fsS http://127.0.0.1:3000/api/dashboards/uid/orch | jq '.dashboard.panels | length')" = 6 ]
+dashboard_has_seven_panels() {
+    [ "$(curl -fsS http://127.0.0.1:3000/api/dashboards/uid/orch | jq '.dashboard.panels | length')" = 7 ]
 }
 
 grafana_queries_prometheus() {  # as the anonymous viewer, like a dashboard panel
@@ -78,7 +78,7 @@ check "coordinator /healthz" curl -fsS http://127.0.0.1:8080/healthz
 check "Prometheus scrapes the coordinator" prom_equals 'up{job="coordinator"}' 1
 check "all three workers connected (seen through Prometheus)" \
     prom_equals 'orch_nodes{health="alive"}' 3
-check "Grafana provisioned the 6-panel dashboard" dashboard_has_six_panels
+check "Grafana provisioned the 7-panel dashboard" dashboard_has_seven_panels
 check "Grafana queries Prometheus" grafana_queries_prometheus
 
 submit_job() {  # prints the new job's id

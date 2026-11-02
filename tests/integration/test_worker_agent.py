@@ -3,14 +3,8 @@ SIGTERM (which supervisors in compose.yaml depend on), and jobs running end to
 end as real subprocesses. Workers here use the `process` runtime, so these
 tests don't need Docker."""
 
-import json
-import os
 import signal
-import subprocess
 import sys
-from pathlib import Path
-
-import pytest
 
 from test_job_lifecycle import http
 from test_worker_connection import ALIVE, eventually, scrape
@@ -18,33 +12,6 @@ from test_worker_connection import ALIVE, eventually, scrape
 EXIT_REJECTED = 3
 EXIT_REPLACED = 4
 TERMINAL = {"succeeded", "failed", "lost", "cancelled"}
-
-
-@pytest.fixture
-def process_profile(tmp_path) -> Path:
-    path = tmp_path / "process.json"
-    path.write_text(json.dumps({"accelerator": "cpu", "runtimes": ["process"]}))
-    return path
-
-
-@pytest.fixture
-def start_worker(coordinator, process_profile, tmp_path):
-    started = []
-
-    def start(node_id: str, token: str | None = None, slots: int = 1) -> subprocess.Popen:
-        log = open(tmp_path / f"{node_id}-{len(started)}.log", "w")
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "orch_worker", "--coordinator", coordinator.ws_url,
-             "--node-id", node_id, "--slots", str(slots), "--profile", str(process_profile)],
-            env={**os.environ, "CLUSTER_TOKEN": token or coordinator.token},
-            stdout=log, stderr=log)
-        started.append(proc)
-        return proc
-
-    yield start
-    for proc in started:
-        proc.kill()
-        proc.wait()
 
 
 def python(code: str, **spec) -> dict:

@@ -50,7 +50,10 @@ class Registry {
     // rejoins. Placed jobs are the caller's to requeue and release.
     void mark_dead(const NodeId& id);
 
-    void heartbeat(const NodeId& id, Clock::time_point now);
+    // Records a heartbeat; a SUSPECT node becomes ALIVE again. Returns true if
+    // it did. A DEAD node stays dead until it rejoins with a new hello.
+    bool heartbeat(const NodeId& id, Clock::time_point now);
+    void mark_suspect(const NodeId& id);
 
     // Bookkeeping for jobs placed on a node; the node must exist.
     void place(const NodeId& node, const JobId& job);

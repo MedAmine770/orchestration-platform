@@ -71,6 +71,7 @@ def test_job_runs_to_success_with_latencies_recorded(coordinator):
     assert job["exit_code"] == 0
     [attempt] = job["attempts"]
     assert attempt["node"] == "w1" and attempt["outcome"] == "succeeded"
+    assert attempt["queue_wait_ns"] >= 0
     assert 0 < attempt["dispatch_latency_ns"] <= attempt["start_latency_ns"]
     assert attempt["image_pulled"] is False
     assert scrape(coordinator, "orch_dispatch_latency_seconds_count") == 1

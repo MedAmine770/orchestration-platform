@@ -55,24 +55,32 @@ orch::protocol::JobSpec spec(Accelerator accelerator = Accelerator::cpu) {
     return s;
 }
 
+// Assigned field by field: GCC warns on designated initializers that leave
+// fields out (-Wmissing-field-initializers).
+orch::Submission submission(std::string id, orch::protocol::JobSpec s,
+                            std::optional<std::string> key = std::nullopt) {
+    orch::Submission sub;
+    sub.id = std::move(id);
+    sub.spec = std::move(s);
+    sub.idempotency_key = std::move(key);
+    return sub;
+}
+
 class JobsTest : public ::testing::Test {
   protected:
-    // Assigned field by field: GCC warns on designated initializers that leave
-    // fields out (-Wmissing-field-initializers).
-    static orch::Submission submission(std::string id, orch::protocol::JobSpec s,
-                                       std::optional<std::string> key = std::nullopt) {
-        orch::Submission sub;
-        sub.id = std::move(id);
-        sub.spec = std::move(s);
-        sub.idempotency_key = std::move(key);
-        return sub;
-    }
-
     orch::metrics::Registry metrics_registry;
     orch::CoordinatorMetrics metrics{metrics_registry};
     orch::Registry registry{metrics};
     orch::LeastLoaded policy;
-    orch::Jobs jobs{orch::JobsConfig{}, registry, policy, metrics};
+    // These tests are about job timers, not failure detection, so heartbeat
+    // deadlines are pushed out of their way. HeartbeatTest uses the defaults.
+    static orch::JobsConfig quiet_heartbeats() {
+        orch::JobsConfig c;
+        c.suspect_after = 1h;
+        c.dead_after = 2h;
+        return c;
+    }
+    orch::Jobs jobs{quiet_heartbeats(), registry, policy, metrics};
     Clock::time_point t0{};  // tests advance time explicitly from here
 
     // Every test ends with the orch_jobs gauge agreeing with the job table.
@@ -142,7 +150,8 @@ TEST_F(JobsTest, HappyPathRecordsExactLatenciesAndFreesTheSlot) {
 
     EXPECT_EQ(started("a", "j1", 1, t0 + 40ms, /*pulled=*/false), MessageResult::accepted);
     EXPECT_EQ(job("j1").state, JobState::running);
-    EXPECT_EQ(jobs.next_deadline(), std::nullopt);  // the worker enforces max_runtime_s
+    // The worker enforces max_runtime_s; only the node's heartbeat deadline is left.
+    EXPECT_EQ(jobs.next_deadline(), t0 + 1h);
 
     EXPECT_EQ(finished("a", "j1", 1, 0, t0 + 1s), MessageResult::accepted);
     EXPECT_EQ(job("j1").state, JobState::succeeded);
@@ -150,6 +159,7 @@ TEST_F(JobsTest, HappyPathRecordsExactLatenciesAndFreesTheSlot) {
     EXPECT_EQ(registry.find("a")->free_slots(), 1u);
 
     const orch::Attempt& a = job("j1").attempts.at(0);
+    EXPECT_EQ(a.queue_wait, 0ns);  // placed the moment it was queued
     EXPECT_EQ(a.dispatch_latency, 3ms);
     EXPECT_EQ(a.start_latency, 40ms);
     EXPECT_EQ(a.image_pulled, false);
@@ -222,9 +232,11 @@ TEST_F(JobsTest, QueuedWaitsForCapacityAndSkipsJobsThatCantBePlaced) {
     // passes it instead of waiting behind it.
     ack("cpu-1", "cpu-a", 1, t0);
     started("cpu-1", "cpu-a", 1, t0);
-    finished("cpu-1", "cpu-a", 1, 0, t0);
+    finished("cpu-1", "cpu-a", 1, 0, t0 + 7ms);
     EXPECT_EQ(job("gpu-2").state, JobState::queued);
     EXPECT_EQ(job("cpu-b").node, "cpu-1");
+    EXPECT_EQ(job("cpu-b").attempts.at(0).queue_wait, 7ms);  // waited for the slot
+    EXPECT_EQ(metrics.queue_wait.snapshot().count, 3u);
 }
 
 TEST_F(JobsTest, QueuedJobsBecomeUnschedulableWhenTheLastEligibleNodeDies) {
@@ -429,4 +441,103 @@ TEST_F(JobsTest, CancellingAQueuedJobSendsNothing) {
     submit("j1");  // UNSCHEDULABLE: no nodes
     EXPECT_EQ(jobs.cancel("j1", t0), CancelResult::cancelled);
     EXPECT_EQ(effects(), std::vector<Effect>{});
+}
+
+// ---- Failure detection and reconciliation (DESIGN.md §10, §7.3) ---------------
+
+namespace {
+
+class HeartbeatTest : public ::testing::Test {
+  protected:
+    orch::metrics::Registry metrics_registry;
+    orch::CoordinatorMetrics metrics{metrics_registry};
+    orch::Registry registry{metrics};
+    orch::LeastLoaded policy;
+    orch::Jobs jobs{orch::JobsConfig{}, registry, policy, metrics};  // 3 s suspect, 5 s dead
+    Clock::time_point t0{};
+
+    orch::Health health(const std::string& node) { return registry.find(node)->health; }
+    const Job& job(const std::string& id) { return *jobs.find(id); }
+    void run_on(const std::string& node, const std::string& id, Clock::time_point at) {
+        jobs.submit(submission(id, spec()), at);
+        ASSERT_EQ(job(id).node, node);
+        jobs.on_ack(node, {JobRef{id, 1}}, at);
+        jobs.on_started(node, {JobRef{id, 1}, false}, at);
+    }
+};
+
+}  // namespace
+
+TEST_F(HeartbeatTest, SilentNodeIsSuspectThenDeadAndItsJobMovesWithADisconnect) {
+    jobs.node_joined("a", caps(), 1, t0);
+    run_on("a", "j1", t0);
+    jobs.node_joined("b", caps(), 1, t0 + 1s);
+    jobs.take_effects();
+    EXPECT_EQ(jobs.next_deadline(), t0 + 3s);  // a's suspect deadline
+
+    jobs.heartbeat("b", t0 + 2500ms);  // b stays healthy throughout
+    jobs.tick(t0 + 3s - 1ns);
+    EXPECT_EQ(health("a"), orch::Health::alive);
+    jobs.tick(t0 + 3s);
+    EXPECT_EQ(health("a"), orch::Health::suspect);
+    EXPECT_EQ(metrics.heartbeats_missed.value(), 1u);
+    EXPECT_EQ(job("j1").state, JobState::running);  // suspect alone moves nothing
+    EXPECT_EQ(jobs.next_deadline(), t0 + 5s);       // a's dead deadline
+
+    jobs.heartbeat("b", t0 + 4500ms);
+    jobs.tick(t0 + 5s);
+    EXPECT_EQ(health("a"), orch::Health::dead);
+    EXPECT_EQ(job("j1").node, "b");
+    EXPECT_EQ(job("j1").attempt, 2u);
+    EXPECT_EQ(job("j1").attempts.at(0).outcome, "node_dead");
+    // The socket may still be open (hung process): the coordinator closes it.
+    EXPECT_EQ(jobs.take_effects(),
+              (std::vector<Effect>{orch::Disconnect{"a"}, SendAssign{"b", {{"j1", 2}, spec()}}}));
+}
+
+TEST_F(HeartbeatTest, SuspectNodeGetsNoPlacementsUntilItsHeartbeatReturns) {
+    jobs.node_joined("a", caps(), 1, t0);
+    jobs.tick(t0 + 3s);
+    ASSERT_EQ(health("a"), orch::Health::suspect);
+
+    jobs.submit(submission("j1", spec()), t0 + 3s);
+    EXPECT_EQ(job("j1").state, JobState::queued);  // eligible, but not placed
+
+    jobs.heartbeat("a", t0 + 3500ms);
+    EXPECT_EQ(health("a"), orch::Health::alive);
+    EXPECT_EQ(job("j1").state, JobState::assigned);
+    jobs.tick(t0 + 6s);  // the recovered heartbeat reset the clock
+    EXPECT_EQ(health("a"), orch::Health::alive);
+}
+
+TEST_F(HeartbeatTest, ReconnectKeepsReportedWorkCancelsStaleWorkRequeuesMissingWork) {
+    jobs.node_joined("a", caps(), 3, t0);
+    run_on("a", "kept", t0);
+    run_on("a", "missing", t0);
+    jobs.take_effects();
+
+    // A new session for "a" (e.g. after a half-open connection) reports
+    // `kept` and an attempt the coordinator no longer considers current.
+    jobs.node_joined("a", caps(), 3, t0 + 1s, {{"kept", 1}, {"old-job", 7}});
+    EXPECT_EQ(job("kept").state, JobState::running);
+    EXPECT_EQ(job("kept").attempt, 1u);
+    EXPECT_EQ(job("missing").retries_used, 1u);  // lost with the previous process
+    EXPECT_EQ(job("missing").attempt, 2u);       // requeued and placed again
+    EXPECT_EQ(jobs.take_effects(),
+              (std::vector<Effect>{SendCancel{"a", {{"old-job", 7}}},
+                                   SendAssign{"a", {{"missing", 2}, spec()}}}));
+}
+
+TEST_F(HeartbeatTest, ANodeDeclaredDeadThatComesBackHasItsOldAttemptCancelled) {
+    jobs.node_joined("a", caps(), 1, t0);
+    run_on("a", "j1", t0);
+    jobs.node_joined("b", caps(), 1, t0 + 4s);
+    jobs.tick(t0 + 5s);  // a dead, j1 moves to b as attempt 2
+    jobs.take_effects();
+
+    // a was only frozen (SIGSTOP, GC pause...) and still runs attempt 1.
+    jobs.node_joined("a", caps(), 1, t0 + 6s, {{"j1", 1}});
+    EXPECT_EQ(health("a"), orch::Health::alive);
+    EXPECT_EQ(jobs.take_effects(), (std::vector<Effect>{SendCancel{"a", {{"j1", 1}}}}));
+    EXPECT_EQ(job("j1").node, "b");
 }

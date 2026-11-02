@@ -39,7 +39,7 @@ sleep 3
 curl -s localhost:8080/v1/jobs/$JOB | jq '{state, exit_code, attempts}'
 ```
 
-`attempts` shows the node and the exact dispatch and start latency in nanoseconds,
+`attempts` shows the node and the exact queue wait, dispatch and start latency in nanoseconds,
 and whether the image had to be pulled. The job's output is in
 `docker compose logs worker-cpu worker-cpu-2`.
 
@@ -57,9 +57,8 @@ Five slots in total, so the burst queues up and drains in about 15 s. Run the la
 command a few times to watch jobs move from `queued` through `running` to `succeeded`.
 The latency panels are `histogram_quantile()` estimates over a 1-minute window.
 
-Expect the burst's dispatch latency to read in **seconds**: it is measured from the
-moment a job is queued, so it includes the wait for a free slot (DESIGN.md §11). A
-single job submitted to idle workers, as in step 3, shows the scheduler's own path.
+The burst shows up in **queue wait** (seconds: jobs waiting for a free slot), while
+**dispatch latency** (assign sent → ack) stays small. DESIGN.md §11 defines all three.
 
 **5. A few more things to try:**
 

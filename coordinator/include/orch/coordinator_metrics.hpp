@@ -15,6 +15,7 @@ class CoordinatorMetrics {
   public:
     explicit CoordinatorMetrics(metrics::Registry& registry);
 
+    metrics::Histogram& queue_wait;
     metrics::Histogram& dispatch_latency;
     metrics::Histogram& start_latency_cached;
     metrics::Histogram& start_latency_pulled;

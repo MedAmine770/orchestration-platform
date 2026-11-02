@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -78,7 +79,7 @@ void Server::on_authenticated(const std::shared_ptr<WorkerSession>& session,
         previous->close(kCloseReplaced, "replaced by a newer session");
     }
     slot = session;
-    jobs_.node_joined(hello.node_id, hello.capabilities, hello.slots, Clock::now());
+    jobs_.node_joined(hello.node_id, hello.capabilities, hello.slots, Clock::now(), hello.running);
     flush();
 }
 
@@ -98,7 +99,9 @@ void Server::on_closed(const WorkerSession& session) {
 }
 
 void Server::on_heartbeat(const WorkerSession& session) {
-    if (is_current(session)) nodes_.heartbeat(session.node_id(), Clock::now());
+    if (!is_current(session)) return;
+    jobs_.heartbeat(session.node_id(), Clock::now());
+    flush();  // a recovered node may take jobs; and the heartbeat deadline moved
 }
 
 void Server::on_job_message(const WorkerSession& session, const protocol::Message& message) {
@@ -146,7 +149,12 @@ void Server::flush() {
                 // No live session: the node just went away. Dropping the
                 // message is safe; its timer or node_lost requeues the job.
                 const auto it = workers_.find(e.node);
-                if (const auto session = it == workers_.end() ? nullptr : it->second.lock()) {
+                const auto session = it == workers_.end() ? nullptr : it->second.lock();
+                if (!session) return;
+                if constexpr (std::is_same_v<std::decay_t<decltype(e)>, Disconnect>) {
+                    std::cerr << "node " << e.node << " missed its heartbeats; declared dead\n";
+                    session->close(kCloseDead, "missed heartbeats");
+                } else {
                     session->send(e.message);
                 }
             },

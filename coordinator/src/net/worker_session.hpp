@@ -24,6 +24,7 @@ class Server;
 inline constexpr std::uint16_t kClosePolicy = 1008;    // auth failure, hello missing/late
 inline constexpr std::uint16_t kCloseProtocol = 1002;  // undecodable or out-of-place message
 inline constexpr std::uint16_t kCloseReplaced = 4000;  // same node_id connected again
+inline constexpr std::uint16_t kCloseDead = 4001;      // declared dead: missed heartbeats
 
 // One worker connection, from the upgrade request until the socket closes.
 //

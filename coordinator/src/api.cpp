@@ -139,6 +139,7 @@ json job_json(const Job& job) {
             {"node", a.node},
             {"outcome", a.outcome.empty() ? json(nullptr) : json(a.outcome)},
             // Integer nanoseconds: these are the bench's exact raw samples.
+            {"queue_wait_ns", optional_json(ns(a.queue_wait))},
             {"dispatch_latency_ns", optional_json(ns(a.dispatch_latency))},
             {"start_latency_ns", optional_json(ns(a.start_latency))},
             {"image_pulled", optional_json(a.image_pulled)},

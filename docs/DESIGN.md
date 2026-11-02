@@ -13,7 +13,7 @@ component here earns its place; anything that doesn't is listed as a non-goal.
   *silently* accept a job's result twice.
 - Survive coordinator restart: recover queued and in-flight jobs from disk.
 - Make two claims measurable, with p50/p95/p99 from scripts committed in `bench/`:
-  - **Dispatch latency** under 100 ms (defined in §10).
+  - **Dispatch latency** under 100 ms (defined in §11).
   - **Fault-tolerant reassignment**: a job on a killed worker completes elsewhere.
 
 **Non-goals (v2)**
@@ -81,9 +81,9 @@ flowchart LR
 WebSocket endpoint (HTTP upgrade on `/v1/workers`) from one Boost.Beast listener.
 
 **Request path for one job:** `POST /v1/jobs` → job committed as `QUEUED` → `201` →
-scheduler picks a node → assignment committed (`attempt = n`) → `assign` pushed → worker
-`ack` (**dispatch latency ends**) → worker starts the container → `started`
-(**start latency ends**) → … → `finished`.
+scheduler picks a node (**queue wait ends**) → assignment committed (`attempt = n`) →
+`assign` pushed → worker `ack` (**dispatch latency ends**) → worker starts the container
+→ `started` (**start latency ends**) → … → `finished`.
 
 ## 4. Components
 
@@ -324,6 +324,10 @@ this message rate.
 - **Duplicate `node_id`:** a new authenticated session replaces the old one, which is
   closed. This handles a worker reconnecting before the coordinator noticed a half-open
   connection; jobs on the old session are reconciled against the new `hello.running`.
+- **Reconciliation on every `hello`:** an attempt the worker reports that is still that
+  node's current assignment keeps running; any other reported attempt gets `cancel`;
+  a job placed on the node that the worker doesn't report was lost with its previous
+  process and is requeued as an infrastructure failure.
 
 ## 8. Persistence and recovery
 
@@ -393,24 +397,38 @@ monotonic, so a new leader would simply bump it.
 - Shorter timeouts give faster recovery but more false positives. False positives are
   *safe* (fencing) but waste work. All values are configurable; the kill-worker test
   reports time-to-detect and time-to-reassign.
+- Implementation: `Jobs::tick(now)` checks each node's silence alongside the job
+  timers, and `next_deadline()` includes each node's next heartbeat deadline, so the
+  same single timer drives both. `orch_heartbeats_missed_total` counts each
+  `ALIVE → SUSPECT` transition. A heartbeat from a `SUSPECT` node makes it `ALIVE`.
+- A node declared `DEAD` by heartbeat may still have an open socket (a hung process,
+  a half-open connection), so the coordinator closes it with code `4001`. When the
+  worker comes back, the reconciliation in §7.3 cancels its stale attempts.
+- Flags: `--suspect-after-ms`, `--dead-after-ms`.
 
 ## 11. Measurement methodology
 
 | Metric | From | To |
 |---|---|---|
-| **Dispatch latency** | job committed as `QUEUED` | coordinator receives `ack` |
-| **Start latency**, cached image | job committed | coordinator receives `started` |
+| **Queue wait** | job enters `QUEUED` | scheduler places it and sends `assign` |
+| **Dispatch latency** | `assign` sent | coordinator receives `ack` |
+| **Start latency**, cached image | job enters `QUEUED` | coordinator receives `started` |
 | **Start latency**, cold image | same, image removed beforehand | same |
 
 - Every interval is measured on the **coordinator's monotonic clock**, so clock skew
   between machines can't distort it.
-- Both are recorded per attempt and start at the job's **latest entry into `QUEUED`**:
-  submit, or a requeue after a reject or failure. Time spent `UNSCHEDULABLE` (no capable
-  node connected at all) is excluded; time waiting for a free slot is included.
+- All three are recorded per attempt. Queue wait and start latency start at the job's
+  **latest entry into `QUEUED`**: submit, or a requeue after a reject or failure. Time
+  spent `UNSCHEDULABLE` (no capable node connected at all) is excluded.
+- **Why queue wait is separate.** Under a backlog, the time from `QUEUED` to `ack` is
+  almost all waiting for a free slot: a capacity question, not a scheduler one. Split,
+  each number answers one question: queue wait says whether there is enough capacity,
+  dispatch says how fast the coordinator and protocol hand out work, and start latency
+  stays end to end, as a user sees it.
 - Reported as p50/p95/p99/max with sample count, load level (submissions/s, worker
   count), and hardware.
-- Dispatch is measured with idle capacity and under backlog; queueing delay under
-  backlog is reported, not hidden.
+- Measured with idle capacity and under a burst; queue wait under the burst is
+  reported, not hidden.
 - Nothing goes in the README unless a script in `bench/` produced it.
 
 **Two views of the same run.** The coordinator records each job's dispatch and start
@@ -433,6 +451,7 @@ Observability is part of the core, not an add-on. The `metrics` module is built 
 
 | Metric | Type | Labels |
 |---|---|---|
+| `orch_queue_wait_seconds` | histogram | — |
 | `orch_dispatch_latency_seconds` | histogram | — |
 | `orch_start_latency_seconds` | histogram | `image` = `cached` \| `pulled` |
 | `orch_jobs` | gauge | `state` (queue depth by state) |
@@ -446,7 +465,7 @@ Observability is part of the core, not an add-on. The `metrics` module is built 
 All label values come from fixed enums, never from job or node IDs, so the number of
 time series stays bounded.
 
-**Histogram buckets** (seconds), shared by both latency metrics:
+**Histogram buckets** (seconds), shared by all three latency metrics:
 
 ```
 0.0005 0.001 0.002 0.003 0.005 0.0075 0.01 0.015 0.02 0.03 0.05 0.075 0.1
@@ -469,14 +488,15 @@ Prometheus scrapes the coordinator and sees both workers, Grafana has the dashbo
 can query Prometheus, the live `/metrics` passes `promtool check metrics`, and a worker
 exits 0 on `docker stop` and 3 with a wrong token.
 
-### 12.3 Dashboard (6 panels)
+### 12.3 Dashboard (7 panels)
 
-1. Dispatch latency: p50 / p95 / p99.
-2. Start latency: p50 / p95 / p99, cached vs pulled.
-3. Jobs by state (queue depth over time).
-4. Nodes by health.
-5. Throughput: jobs finished per second by outcome, plus requeues per second by reason.
-6. Fault signals: stale messages, missed heartbeats, auth failures.
+1. Queue wait: p50 / p95 / p99.
+2. Dispatch latency: p50 / p95 / p99.
+3. Start latency: p50 / p95 / p99, cached vs pulled.
+4. Jobs by state (queue depth over time).
+5. Nodes by health.
+6. Throughput: jobs finished per second by outcome, plus requeues per second by reason.
+7. Fault signals: stale messages, missed heartbeats, auth failures.
 
 ## 13. Toolchain and repository
 
@@ -515,6 +535,7 @@ docs/          DESIGN.md
 | D9 | Shared token in `hello`; REST unauthenticated on a trusted network | Minimal auth that keeps rogue workers out |
 | D10 | Compose only; no warm pool | Scope fits two weeks |
 | D12 | Prometheus + Grafana required; metrics module built first; README uses exact percentiles from raw samples | Every milestone is observable; histogram quantiles are estimates, raw samples are exact |
+| D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
 
 ## 15. Milestones (~2 weeks)
 

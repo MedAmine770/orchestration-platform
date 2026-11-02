@@ -77,8 +77,29 @@ CancelResult Jobs::cancel(const JobId& id, Clock::time_point now) {
 }
 
 void Jobs::node_joined(const NodeId& id, protocol::Capabilities capabilities, std::uint32_t slots,
-                       Clock::time_point now) {
-    registry_.join(id, std::move(capabilities), slots, now);
+                       Clock::time_point now, const std::vector<protocol::JobRef>& running) {
+    const Node& node = registry_.join(id, std::move(capabilities), slots, now);
+
+    // Reconcile (DESIGN.md §7.3). A reported attempt that is still this
+    // node's current assignment keeps running. Any other is stale (e.g. its job
+    // was requeued while the node was gone): cancel it so it stops.
+    std::set<JobId> reported;
+    for (const protocol::JobRef& ref : running) {
+        const auto it = jobs_.find(ref.job_id);
+        if (it != jobs_.end() && it->second.node == id && it->second.attempt == ref.attempt) {
+            reported.insert(ref.job_id);
+        } else {
+            effects_.push_back(SendCancel{id, protocol::Cancel{ref}});
+        }
+    }
+    // A job placed here that the worker doesn't report was lost with its
+    // previous process (e.g. the worker restarted): requeue it.
+    const std::set<JobId> placed = node.jobs;  // copy: requeueing releases them
+    for (const JobId& job_id : placed) {
+        if (!reported.contains(job_id)) {
+            infrastructure_failure(jobs_.at(job_id), "node_dead", false, now);
+        }
+    }
     reevaluate_waiting(now);
     schedule(now);
 }
@@ -86,16 +107,48 @@ void Jobs::node_joined(const NodeId& id, protocol::Capabilities capabilities, st
 void Jobs::node_lost(const NodeId& id, Clock::time_point now) {
     const Node* node = registry_.find(id);
     if (node == nullptr || node->health == Health::dead) return;
-    // Dead first, so the requeued jobs' eligibility check already excludes it.
-    registry_.mark_dead(id);
-    const std::set<JobId> placed = node->jobs;  // copy: requeueing releases them
-    for (const JobId& job_id : placed) {
-        // No cancel: there is no connection to send it on. If the node is only
-        // partitioned and still runs the job, fencing rejects its late messages.
-        infrastructure_failure(jobs_.at(job_id), "node_dead", false, now);
-    }
+    fail_node(id, now);
     reevaluate_waiting(now);
     schedule(now);
+}
+
+void Jobs::heartbeat(const NodeId& id, Clock::time_point now) {
+    // A SUSPECT node that recovers can take placements again.
+    if (registry_.heartbeat(id, now)) schedule(now);
+}
+
+void Jobs::fail_node(const NodeId& id, Clock::time_point now) {
+    // Dead first, so the requeued jobs' eligibility check already excludes it.
+    registry_.mark_dead(id);
+    const std::set<JobId> placed = registry_.find(id)->jobs;  // copy: requeueing releases them
+    for (const JobId& job_id : placed) {
+        // No cancel: the connection is gone or about to be closed. If the node
+        // is only partitioned and still runs the job, fencing rejects its late
+        // messages, and reconciliation cancels the work when it reconnects.
+        infrastructure_failure(jobs_.at(job_id), "node_dead", false, now);
+    }
+}
+
+// DESIGN.md §10: SUSPECT after suspect_after without a heartbeat, DEAD after
+// dead_after. Socket close alone can't detect a hung process or a half-open
+// connection, which keep the socket open.
+void Jobs::check_heartbeats(Clock::time_point now) {
+    std::vector<NodeId> dead;
+    for (const auto& [id, node] : registry_.nodes()) {
+        if (node.health == Health::dead) continue;
+        const auto silence = now - node.last_heartbeat;
+        if (silence >= config_.dead_after) {
+            dead.push_back(id);
+        } else if (silence >= config_.suspect_after && node.health == Health::alive) {
+            registry_.mark_suspect(id);
+            metrics_.heartbeats_missed.inc();
+        }
+    }
+    for (const NodeId& id : dead) {
+        fail_node(id, now);
+        effects_.push_back(Disconnect{id});
+    }
+    if (!dead.empty()) reevaluate_waiting(now);
 }
 
 // ---- Worker messages --------------------------------------------------------
@@ -119,7 +172,7 @@ MessageResult Jobs::on_ack(const NodeId& from, const protocol::Ack& msg, Clock::
     if (job == nullptr) return MessageResult::stale;
     if (job->state != JobState::assigned) return MessageResult::ignored;
 
-    const auto latency = now - job->queued_at;
+    const auto latency = now - job->attempts.back().assigned_at;
     job->attempts.back().dispatch_latency = latency;
     metrics_.dispatch_latency.observe(latency);
     job->deadline = now + config_.start_timeout;
@@ -186,6 +239,7 @@ MessageResult Jobs::on_finished(const NodeId& from, const protocol::Finished& ms
 // ---- Timers -----------------------------------------------------------------
 
 void Jobs::tick(Clock::time_point now) {
+    check_heartbeats(now);
     const std::set<JobId> timed = timed_;  // copy: requeueing edits timed_
     for (const JobId& id : timed) {
         Job& job = jobs_.at(id);
@@ -199,9 +253,13 @@ void Jobs::tick(Clock::time_point now) {
 
 std::optional<Clock::time_point> Jobs::next_deadline() const {
     std::optional<Clock::time_point> next;
-    for (const JobId& id : timed_) {
-        const Clock::time_point d = *jobs_.at(id).deadline;
+    const auto consider = [&](Clock::time_point d) {
         if (!next || d < *next) next = d;
+    };
+    for (const JobId& id : timed_) consider(*jobs_.at(id).deadline);
+    for (const auto& [id, node] : registry_.nodes()) {
+        if (node.health == Health::alive) consider(node.last_heartbeat + config_.suspect_after);
+        if (node.health == Health::suspect) consider(node.last_heartbeat + config_.dead_after);
     }
     return next;
 }
@@ -271,6 +329,8 @@ void Jobs::place(Job& job, const NodeId& node, Clock::time_point now) {
     attempt.number = job.attempt;
     attempt.node = node;
     attempt.assigned_at = now;
+    attempt.queue_wait = now - job.queued_at;
+    metrics_.queue_wait.observe(*attempt.queue_wait);
     registry_.place(node, job.id);
     set_state(job, JobState::assigned);
     effects_.push_back(SendAssign{node, protocol::Assign{{job.id, job.attempt}, job.spec}});

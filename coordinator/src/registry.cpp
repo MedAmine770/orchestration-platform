@@ -36,8 +36,17 @@ void Registry::mark_dead(const NodeId& id) {
     if (Node* node = find(id)) set_health(*node, Health::dead);
 }
 
-void Registry::heartbeat(const NodeId& id, Clock::time_point now) {
-    if (Node* node = find(id)) node->last_heartbeat = now;
+bool Registry::heartbeat(const NodeId& id, Clock::time_point now) {
+    Node* node = find(id);
+    if (node == nullptr || node->health == Health::dead) return false;
+    node->last_heartbeat = now;
+    if (node->health != Health::suspect) return false;
+    set_health(*node, Health::alive);
+    return true;
+}
+
+void Registry::mark_suspect(const NodeId& id) {
+    if (Node* node = find(id)) set_health(*node, Health::suspect);
 }
 
 void Registry::place(const NodeId& node, const JobId& job) { nodes_.at(node).jobs.insert(job); }

@@ -1,12 +1,12 @@
 {
   "uid": "orch",
   "title": "Orchestration platform",
-  "description": "The six panels of DESIGN.md §12.3. Latency quantiles are histogram_quantile() estimates; the README's exact percentiles come from the bench's raw samples.",
+  "description": "The seven panels of DESIGN.md §12.3. Latency quantiles are histogram_quantile() estimates; the README's exact percentiles come from the bench's raw samples.",
   "tags": [
     "orch"
   ],
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": false,
   "refresh": "5s",
   "time": {
@@ -17,12 +17,60 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Dispatch latency (QUEUED commit → ack)",
-      "description": "Estimated from orch_dispatch_latency_seconds; can differ from exact percentiles by up to one bucket width. Over a 1-minute window, so a short burst of jobs stays readable.",
+      "title": "Queue wait (QUEUED → assign sent)",
+      "description": "Estimated from orch_queue_wait_seconds: time spent waiting for a free slot. Over a 1-minute window, so a short burst of jobs stays readable.",
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 12,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(orch_queue_wait_seconds_bucket[1m])))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(orch_queue_wait_seconds_bucket[1m])))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(orch_queue_wait_seconds_bucket[1m])))"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Dispatch latency (assign sent → ack)",
+      "description": "Estimated from orch_dispatch_latency_seconds: coordinator → worker → coordinator round trip for one assignment. Over a 1-minute window.",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
         "h": 8
       },
       "datasource": {
@@ -63,14 +111,14 @@
       ]
     },
     {
-      "id": 2,
+      "id": 3,
       "type": "timeseries",
-      "title": "Start latency (QUEUED commit → started), cached vs pulled image",
+      "title": "Start latency (QUEUED → started), cached vs pulled",
       "description": "Estimated from orch_start_latency_seconds, split by whether the worker had to pull the image. Over a 1-minute window, so a short burst of jobs stays readable.",
       "gridPos": {
-        "x": 12,
+        "x": 16,
         "y": 0,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "datasource": {
@@ -111,7 +159,7 @@
       ]
     },
     {
-      "id": 3,
+      "id": 4,
       "type": "timeseries",
       "title": "Jobs by state",
       "gridPos": {
@@ -155,7 +203,7 @@
       ]
     },
     {
-      "id": 4,
+      "id": 5,
       "type": "timeseries",
       "title": "Nodes by health",
       "gridPos": {
@@ -193,7 +241,7 @@
       ]
     },
     {
-      "id": 5,
+      "id": 6,
       "type": "timeseries",
       "title": "Throughput: jobs finished and requeued per second",
       "gridPos": {
@@ -235,7 +283,7 @@
       ]
     },
     {
-      "id": 6,
+      "id": 7,
       "type": "timeseries",
       "title": "Fault signals (per minute)",
       "description": "Fenced-out stale messages, missed heartbeat deadlines, and rejected worker tokens.",

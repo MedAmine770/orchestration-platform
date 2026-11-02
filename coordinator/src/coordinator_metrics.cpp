@@ -29,10 +29,12 @@ std::unordered_map<std::string_view, T*> family(const std::array<std::string_vie
 }  // namespace
 
 CoordinatorMetrics::CoordinatorMetrics(metrics::Registry& r)
-    : dispatch_latency(
-          r.histogram("orch_dispatch_latency_seconds",
-                      "Seconds from a job being committed as QUEUED until the worker's ack.",
-                      metrics::kLatencyBuckets)),
+    : queue_wait(r.histogram("orch_queue_wait_seconds",
+                             "Seconds from a job entering QUEUED until its assign is sent.",
+                             metrics::kLatencyBuckets)),
+      dispatch_latency(r.histogram("orch_dispatch_latency_seconds",
+                                   "Seconds from an assign being sent until the worker's ack.",
+                                   metrics::kLatencyBuckets)),
       start_latency_cached(r.histogram("orch_start_latency_seconds", kStartHelp,
                                        metrics::kLatencyBuckets, {{"image", "cached"}})),
       start_latency_pulled(r.histogram("orch_start_latency_seconds", kStartHelp,
