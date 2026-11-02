@@ -549,3 +549,6 @@ docs/          DESIGN.md
 | 6 | Failure handling | Heartbeat detection, requeue, fencing; **integration test kills a worker mid-job** and the job completes elsewhere | day 9 |
 | 7 | Persistence & recovery | Store thread, write-ahead, reconciliation; test kills the coordinator mid-run and recovers | days 10–11 |
 | 8 | Measure & ship | Bench scripts (raw samples, exact p50/p95/p99, cold vs cached) with committed results; Grafana screenshot of the same run; README; interview prep | days 12–14 |
+
+Reordered after M5 for a resume-ready version first: M6, then the bench script with
+committed results and the README (from milestone 8), then milestone 7.
