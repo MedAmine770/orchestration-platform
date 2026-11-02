@@ -7,38 +7,43 @@ execution with attempt fencing, and Prometheus/Grafana observability.
 The design, its trade-offs and the decision log are in [docs/DESIGN.md](docs/DESIGN.md);
 the worker protocol is in [proto/PROTOCOL.md](proto/PROTOCOL.md).
 
-> **Status:** scheduling, the job state machine, end-to-end execution and worker
-> failure detection work and are benchmarked below. Coordinator persistence and
-> restart recovery (DESIGN.md §8) are in progress: today a coordinator restart
-> loses its job table.
+> **Status:** scheduling, the job state machine, end-to-end execution, worker failure
+> detection and coordinator crash recovery work, and are benchmarked below.
 
 ## Results
 
 **Setup: a single host over loopback.** Apple M4 Pro, macOS 15.3, Docker Desktop
 29.6 (Linux VM with 14 CPUs and 8 GB). The coordinator (release build), 3 workers
 (5 slots) and the job containers all run on that one machine, so network latency
-is not included. One run of [`bench/bench.py`](bench/bench.py) at `3abee38`:
+is not included. Job state is persisted with SQLite (`synchronous=FULL`) on the
+Docker VM's disk. One run of [`bench/bench.py`](bench/bench.py) at `455aded`:
 
 | Scenario | Metric | n | p50 | p95 | p99 |
 |---|---|---|---|---|---|
-| Idle (one job at a time) | Dispatch (`assign` → `ack`) | 50 | 0.29 ms | 0.34 ms | 0.66 ms |
-| | Start, cached image (queued → `started`) | 50 | 102 ms | 112 ms | 115 ms |
-| Burst (100 jobs onto 5 slots) | Queue wait (queued → `assign`) | 100 | 4.57 s | 8.95 s | 9.30 s |
-| | Dispatch | 100 | 0.25 ms | 0.42 ms | 0.57 ms |
-| Cold start (image pulled) | Start, pulled image | 10 | 3.05 s | max 3.30 s | |
-| Worker crash (`docker kill`) | Time to reassign | 5 | 108 ms | max 129 ms | |
-| Worker hang (`docker pause`) | Time to detect / to reassign | 5 | 4.81 / 4.81 s | max 4.82 / 4.83 s | |
+| Idle (one job at a time) | Dispatch (placed → `ack`, incl. fsync) | 50 | 1.31 ms | 2.52 ms | 4.28 ms |
+| | Start, cached image (queued → `started`) | 50 | 105 ms | 121 ms | 128 ms |
+| Burst (100 jobs onto 5 slots) | Queue wait (queued → placed) | 100 | 4.63 s | 9.14 s | 9.64 s |
+| | Dispatch | 100 | 1.69 ms | 3.59 ms | 14.6 ms |
+| Cold start (image pulled) | Start, pulled image | 10 | 3.03 s | max 3.80 s | |
+| Worker crash (`docker kill`) | Time to reassign | 5 | 108 ms | max 112 ms | |
+| Worker hang (`docker pause`) | Time to detect / to reassign | 5 | 4.82 / 4.82 s | max 4.82 / 4.82 s | |
 
 - **Percentiles are exact** (nearest rank) over the coordinator's own per-attempt
   nanosecond samples. With fewer than 100 samples, p99 is the maximum, and rows
   with 5 or 10 samples show only the median and the maximum. All tables, raw
   samples and the method: [bench/results/latest.md](bench/results/latest.md),
   [bench/README.md](bench/README.md).
-- **Dispatch stays under 1 ms even when 100 jobs queue for 5 slots.** The backlog
-  shows up as queue wait, which is a capacity question, not a scheduling one.
+- **Dispatch includes the write-ahead commit.** An `assign` leaves only after the
+  assignment is fsynced (DESIGN.md §8.2), which is most of dispatch's ~1.3 ms, and the
+  burst's 14.6 ms p99 (max 24.9 ms) is that fsync's tail. Group commit keeps one fsync
+  per batch of events rather than one per event. Without persistence, the same
+  benchmark measured 0.29 ms p50 (results in `bench/results/`).
+- **Under the burst, the backlog shows up as queue wait**, a capacity question, while
+  dispatch stays in milliseconds. Submissions ran at 423/s, because a `201` is sent
+  only once the job is on disk.
 - **A cached start is about 100 ms, almost all Docker** creating and starting the
   container. A cold start adds the registry pull, so it depends on the network.
-- **Crash numbers are dominated by the `docker kill` command itself** (about 104 ms;
+- **Crash numbers are dominated by the `docker kill` command itself** (about 105 ms;
   reported in its own row in the full results). The socket closing is noticed almost
   immediately.
 - **Hang detection is about 4.8 s here, but in general can fall anywhere from about
@@ -51,9 +56,9 @@ is not included. One run of [`bench/bench.py`](bench/bench.py) at `3abee38`:
 
 *The dashboard during that run, in order: burst, cold starts, crashes, hangs. Its
 quantiles are `histogram_quantile()` estimates over a 1-minute window; the table
-above is exact. For example, the dispatch panel's late jump to about 47 ms is a
-single 30 ms sample (the first job on a worker that had just been un-paused), which
-the estimate places near the top of its histogram bucket.*
+above is exact. For example, during the burst the start-latency p99 reads about
+20 s, while the slowest start was 10.05 s: samples just over 10 s fall into the
+10–30 s histogram bucket, and the estimate interpolates inside that wide bucket.*
 
 ## Demo (about 5 minutes)
 
@@ -128,7 +133,7 @@ JOB=$(curl -s localhost:8080/v1/jobs -d '{"image": "alpine:3.20", "command": ["s
 sleep 2; curl -s -X POST localhost:8080/v1/jobs/$JOB/cancel | jq '{state, reason}'
 ```
 
-**6. Stop it:** `docker compose down`.
+**6. Stop it:** `docker compose down` (job history is kept in the `orch-data` volume; add `-v` to wipe it).
 
 To record the demo as a GIF, run [`deploy/demo.sh`](deploy/demo.sh) (a narrated,
 paced version of the steps above) through [VHS](https://github.com/charmbracelet/vhs):
@@ -141,9 +146,8 @@ paced version of the steps above) through [VHS](https://github.com/charmbracelet
   command ends and is then left stopped, because only the worker removes it. The job
   itself is requeued and completes elsewhere. The bench removes these leftovers and
   counts them (one per crash). Cleaning them up when the worker restarts is future work.
-- **No coordinator persistence yet.** A coordinator restart loses its job table;
-  workers reconnect on their own, but jobs submitted before the restart are gone. This
-  is the next milestone (DESIGN.md §8).
+- **Recovery assumes the database survives.** Job state is fsynced to one SQLite
+  file. Losing that disk loses the jobs (DESIGN.md §8.4).
 - **One coordinator** is a single point of failure: scheduling stops while it is down
   (DESIGN.md §8.4).
 - **Hang detection takes 4–5 s** by default (DESIGN.md §10). Shorter timeouts recover
