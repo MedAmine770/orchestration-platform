@@ -25,6 +25,8 @@ constexpr std::string_view kUsage = R"(usage: coordinator [options]
   --port N                  listen port; 0 picks a free one (default 8080)
   --hello-timeout-ms N      time a worker has to send hello (default 5000)
   --heartbeat-interval-ms N heartbeat interval sent to workers (default 1000)
+  --ack-timeout-ms N        T_ack: time a worker has to ack an assign (default 2000)
+  --start-timeout-ms N      T_start: time from ack to started (default 120000)
   --token-file PATH         read the cluster token from PATH
 
 The cluster token comes from --token-file or the CLUSTER_TOKEN environment
@@ -75,6 +77,11 @@ orch::net::ServerConfig parse_args(int argc, char** argv) {
         } else if (flag == "--heartbeat-interval-ms") {
             config.heartbeat_interval =
                 std::chrono::milliseconds(parse_number(flag, value, 600'000));
+        } else if (flag == "--ack-timeout-ms") {
+            config.jobs.ack_timeout = std::chrono::milliseconds(parse_number(flag, value, 600'000));
+        } else if (flag == "--start-timeout-ms") {
+            config.jobs.start_timeout =
+                std::chrono::milliseconds(parse_number(flag, value, 3'600'000));
         } else if (flag == "--token-file") {
             token_file = value;
         } else {

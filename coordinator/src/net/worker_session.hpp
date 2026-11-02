@@ -62,7 +62,6 @@ class WorkerSession : public std::enable_shared_from_this<WorkerSession> {
 
     std::string node_id_;  // set once authenticated
     bool authenticated_ = false;
-    std::chrono::steady_clock::time_point last_heartbeat_{};  // read by failure detection (M6)
 
     std::deque<std::string> outbox_;
     std::optional<boost::beast::websocket::close_reason> pending_close_;

@@ -40,6 +40,7 @@ find_package(Threads REQUIRED)
 
 # Core library: everything except main(), so tests link the same code the binary runs.
 add_library(orch_core
+    src/api.cpp
     src/coordinator_metrics.cpp
     src/jobs.cpp
     src/metrics.cpp

@@ -4,6 +4,7 @@
 #include <utility>
 #include <variant>
 
+#include "net/overloaded.hpp"
 #include "net/server.hpp"
 
 namespace orch::net {
@@ -15,11 +16,6 @@ namespace {
 
 constexpr std::size_t kMaxFrameBytes = 64 * 1024;  // proto/PROTOCOL.md "Transport"
 constexpr auto kHandshakeTimeout = std::chrono::seconds(5);
-
-template <typename... Fs>
-struct Overloaded : Fs... {
-    using Fs::operator()...;
-};
 
 }  // namespace
 
@@ -94,21 +90,20 @@ void WorkerSession::handle(std::string_view frame) {
         return;
     }
 
-    std::visit(
-        Overloaded{
-            [&](const protocol::Heartbeat&) { last_heartbeat_ = std::chrono::steady_clock::now(); },
-            [&](const protocol::Unknown& u) {
-                std::cerr << "node " << node_id_ << ": ignoring unknown message type '" << u.type
-                          << "'\n";
-            },
-            [&](const protocol::Hello&) { close(kCloseProtocol, "duplicate hello"); },
-            [&](const protocol::Welcome&) { close(kCloseProtocol, "unexpected welcome"); },
-            [&](const protocol::Assign&) { close(kCloseProtocol, "unexpected assign"); },
-            [&](const protocol::Cancel&) { close(kCloseProtocol, "unexpected cancel"); },
-            // ack / reject / started / finished: job handling arrives in M5.
-            [&](const auto&) {},
-        },
-        message);
+    std::visit(Overloaded{
+                   [&](const protocol::Heartbeat&) { server_.on_heartbeat(*this); },
+                   [&](const protocol::Unknown& u) {
+                       std::cerr << "node " << node_id_ << ": ignoring unknown message type '"
+                                 << u.type << "'\n";
+                   },
+                   [&](const protocol::Hello&) { close(kCloseProtocol, "duplicate hello"); },
+                   [&](const protocol::Welcome&) { close(kCloseProtocol, "unexpected welcome"); },
+                   [&](const protocol::Assign&) { close(kCloseProtocol, "unexpected assign"); },
+                   [&](const protocol::Cancel&) { close(kCloseProtocol, "unexpected cancel"); },
+                   // ack / reject / started / finished
+                   [&](const auto&) { server_.on_job_message(*this, message); },
+               },
+               message);
 }
 
 void WorkerSession::handle_hello(const protocol::Hello& hello) {
@@ -121,13 +116,14 @@ void WorkerSession::handle_hello(const protocol::Hello& hello) {
     authenticated_ = true;
     hello_timer_.cancel();
     node_id_ = hello.node_id;
-    last_heartbeat_ = std::chrono::steady_clock::now();
-    server_.on_authenticated(shared_from_this());
     std::cerr << "node " << node_id_ << " connected (" << hello.capabilities.cpus << " cpus, "
               << hello.slots << " slots)\n";
 
+    // welcome first: registering can place queued jobs on this node right
+    // away, and the worker must see welcome before any assign.
     const auto interval = server_.config().heartbeat_interval.count();
     send(protocol::Welcome{static_cast<std::uint32_t>(interval)});
+    server_.on_authenticated(shared_from_this(), hello);
 }
 
 void WorkerSession::send(const protocol::Message& message) {

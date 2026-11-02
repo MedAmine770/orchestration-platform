@@ -21,7 +21,7 @@ namespace websocket = beast::websocket;
 namespace {
 
 constexpr auto kReadTimeout = std::chrono::seconds(30);
-constexpr std::size_t kBodyLimit = 8 * 1024;  // no endpoint takes a body yet
+constexpr std::size_t kBodyLimit = 64 * 1024;  // a job spec is a few hundred bytes
 constexpr std::string_view kWorkersPath = "/v1/workers";
 
 std::string_view path_of(std::string_view target) { return target.substr(0, target.find('?')); }
@@ -70,6 +70,10 @@ HttpSession::Response HttpSession::route(const Request& req) const {
         res.prepare_payload();
         return res;
     };
+
+    if (auto api = server_.handle_api(req.method_string(), req.target(), req.body())) {
+        return reply(http::int_to_status(api->status), "application/json", std::move(api->body));
+    }
 
     const bool known = path == "/healthz" || path == "/metrics" || path == kWorkersPath;
     if (!known) return reply(http::status::not_found, "text/plain", "not found\n");

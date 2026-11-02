@@ -39,7 +39,8 @@ def coordinator(tmp_path):
     log_path = tmp_path / "coordinator.log"
     with open(log_path, "w") as log:
         proc = subprocess.Popen(
-            [str(binary), "--bind", "127.0.0.1", "--port", "0", "--hello-timeout-ms", "300"],
+            [str(binary), "--bind", "127.0.0.1", "--port", "0", "--hello-timeout-ms", "300",
+             "--ack-timeout-ms", "300"],
             env={**os.environ, "CLUSTER_TOKEN": token},
             stdout=subprocess.PIPE,
             stderr=log,  # a file, not a pipe, so a chatty coordinator can never block
