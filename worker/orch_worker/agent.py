@@ -1,4 +1,9 @@
-"""Connection loop: hello -> welcome -> heartbeats, reconnecting on failure."""
+"""Connection loop and job execution.
+
+hello -> welcome -> heartbeats, reconnecting on failure. Each assigned job runs
+in its own task, so a long job never delays a heartbeat, and jobs keep running
+across reconnects: their results go out on whichever connection is current.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from . import __version__
 from .backoff import Backoff
 from .capabilities import MiB
 from .protocol import ProtocolError, decode, encode
+from .runtimes import Outcome, Runtime, make_runtime
 
 log = logging.getLogger("orch_worker")
 
@@ -52,64 +58,144 @@ class FatalError(Exception):
         self.exit_code = exit_code
 
 
-async def run(config: Config, backoff: Backoff | None = None) -> None:
-    """Runs until cancelled or a FatalError."""
-    backoff = backoff or Backoff()
-    while True:
+async def run(config: Config, backoff: Backoff | None = None,
+              runtime: Runtime | None = None) -> None:
+    """Runs until cancelled or a FatalError. Jobs use the node's first
+    advertised runtime unless one is given."""
+    agent = Agent(config, runtime or make_runtime(config.capabilities["runtimes"][0]))
+    try:
+        await agent.run(backoff or Backoff())
+    finally:
+        await agent.stop_jobs()
+
+
+JobKey = tuple[str, int]  # (job_id, attempt)
+
+
+class Agent:
+    def __init__(self, config: Config, runtime: Runtime):
+        self.config = config
+        self.runtime = runtime
+        self.ws = None  # the current connection, if any
+        self.jobs: dict[JobKey, asyncio.Task] = {}
+        # The coordinator only assigns into free slots; if a race ever sends
+        # one too many, the job waits here instead of being rejected (§5.3).
+        self.slots = asyncio.Semaphore(config.slots)
+
+    async def run(self, backoff: Backoff) -> None:
+        while True:
+            try:
+                await self._session(backoff)
+            except ConnectionClosed as e:
+                code = e.rcvd.code if e.rcvd else None
+                if code in FATAL_CLOSE_CODES:
+                    why, exit_code = FATAL_CLOSE_CODES[code]
+                    raise FatalError(f"{why} (close {code}: {e.rcvd.reason})",
+                                     exit_code) from None
+                log.warning("connection closed (code %s)", code)
+            except (OSError, TimeoutError, InvalidHandshake, ProtocolError) as e:
+                log.warning("coordinator unavailable: %s", e)
+            finally:
+                self.ws = None
+            delay = backoff.next()
+            log.info("reconnecting in %.1fs", delay)
+            await asyncio.sleep(delay)
+
+    async def stop_jobs(self) -> None:
+        """On shutdown: cancel every job, which kills its process/container."""
+        for task in self.jobs.values():
+            task.cancel()
+        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+
+    async def _session(self, backoff: Backoff) -> None:
+        async with connect(self.config.url, max_size=MAX_FRAME_BYTES,
+                           open_timeout=HANDSHAKE_TIMEOUT_S) as ws:
+            await ws.send(encode("hello", {
+                "token": self.config.token,
+                "node_id": self.config.node_id,
+                "agent_version": __version__,
+                "capabilities": self.config.capabilities,
+                "slots": self.config.slots,
+                "running": [{"job_id": j, "attempt": a} for j, a in self.jobs],
+            }))
+            welcome = decode(await asyncio.wait_for(ws.recv(), HANDSHAKE_TIMEOUT_S))
+            if welcome.type != "welcome":
+                raise ProtocolError("invalid_value", f"expected welcome, got {welcome.type}")
+            backoff.reset()
+            self.ws = ws
+            interval = welcome.body["heartbeat_interval_ms"] / 1000
+            log.info("connected to %s as %s (heartbeat every %.1fs)",
+                     self.config.url, self.config.node_id, interval)
+
+            heartbeats = asyncio.create_task(self._heartbeats(interval))
+            try:
+                async for frame in ws:
+                    await self._handle(decode(frame))
+            finally:
+                heartbeats.cancel()
+                with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
+                    await heartbeats
+
+    async def _handle(self, message) -> None:
+        if not message.known:
+            log.info("ignoring unknown message type '%s'", message.type)
+        elif message.type == "assign":
+            await self._assign(message.body)
+        elif message.type == "cancel":
+            key = (message.body["job_id"], message.body["attempt"])
+            if task := self.jobs.get(key):
+                log.info("job %s attempt %d: cancelled by the coordinator", *key)
+                task.cancel()
+        else:
+            log.warning("unexpected %s from the coordinator", message.type)
+
+    async def _assign(self, body: dict) -> None:
+        key = (body["job_id"], body["attempt"])
+        if key in self.jobs:
+            return  # a duplicate assign; the ack already went out
+        await self._send("ack", {"job_id": key[0], "attempt": key[1]})
+        self.jobs[key] = asyncio.create_task(self._run_job(key, body["spec"]))
+
+    async def _run_job(self, key: JobKey, spec: dict) -> None:
+        ref = {"job_id": key[0], "attempt": key[1]}
+
+        async def on_started(image_pulled: bool) -> None:
+            await self._send("started", {**ref, "image_pulled": image_pulled})
+
         try:
-            await _session(config, backoff)
-        except ConnectionClosed as e:
-            code = e.rcvd.code if e.rcvd else None
-            if code in FATAL_CLOSE_CODES:
-                why, exit_code = FATAL_CLOSE_CODES[code]
-                raise FatalError(f"{why} (close {code}: {e.rcvd.reason})", exit_code) from None
-            log.warning("connection closed (code %s)", code)
-        except (OSError, TimeoutError, InvalidHandshake, ProtocolError) as e:
-            log.warning("coordinator unavailable: %s", e)
-        delay = backoff.next()
-        log.info("reconnecting in %.1fs", delay)
-        await asyncio.sleep(delay)
-
-
-async def _session(config: Config, backoff: Backoff) -> None:
-    async with connect(config.url, max_size=MAX_FRAME_BYTES,
-                       open_timeout=HANDSHAKE_TIMEOUT_S) as ws:
-        await ws.send(encode("hello", {
-            "token": config.token,
-            "node_id": config.node_id,
-            "agent_version": __version__,
-            "capabilities": config.capabilities,
-            "slots": config.slots,
-            "running": [],  # job execution arrives in M5
-        }))
-        welcome = decode(await asyncio.wait_for(ws.recv(), HANDSHAKE_TIMEOUT_S))
-        if welcome.type != "welcome":
-            raise ProtocolError("invalid_value", f"expected welcome, got {welcome.type}")
-        backoff.reset()
-        interval = welcome.body["heartbeat_interval_ms"] / 1000
-        log.info("connected to %s as %s (heartbeat every %.1fs)",
-                 config.url, config.node_id, interval)
-
-        heartbeats = asyncio.create_task(_heartbeats(ws, interval))
-        try:
-            async for frame in ws:
-                message = decode(frame)
-                if not message.known:
-                    log.info("ignoring unknown message type '%s'", message.type)
-                else:
-                    log.info("received %s (job execution arrives in M5)", message.type)
+            async with self.slots:
+                log.info("job %s attempt %d: running %s", key[0], key[1], spec["command"])
+                try:
+                    outcome = await self.runtime.run(key[0], spec, on_started)
+                except asyncio.CancelledError:
+                    raise  # cancelled: the coordinator already moved on, no result
+                except Exception as e:  # a runtime bug must not kill the agent
+                    log.exception("job %s attempt %d: runtime error", *key)
+                    outcome = Outcome(error=f"worker runtime error: {e}")
+            log.info("job %s attempt %d: %s", key[0], key[1],
+                     f"exit {outcome.exit_code}" if outcome.error is None else outcome.error)
+            result = {"exit_code": outcome.exit_code} if outcome.error is None \
+                else {"error": outcome.error}
+            await self._send("finished", {**ref, **result, "run_ms": outcome.run_ms})
         finally:
-            heartbeats.cancel()
-            with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
-                await heartbeats
+            self.jobs.pop(key, None)
 
+    async def _send(self, type_: str, body: dict) -> None:
+        """Sends on the current connection. Without one the message is
+        dropped: the coordinator has already failed this node's jobs."""
+        ws = self.ws
+        if ws is None:
+            log.warning("not connected; dropping %s for job %s", type_, body.get("job_id"))
+            return
+        with contextlib.suppress(ConnectionClosed):
+            await ws.send(encode(type_, body))
 
-async def _heartbeats(ws, interval: float) -> None:
-    psutil.cpu_percent(None)  # the first call only primes the counter
-    while True:
-        await ws.send(encode("heartbeat", {
-            "running": 0,
-            "cpu_percent": psutil.cpu_percent(None),
-            "mem_free_mb": psutil.virtual_memory().available // MiB,
-        }))
-        await asyncio.sleep(interval)
+    async def _heartbeats(self, interval: float) -> None:
+        psutil.cpu_percent(None)  # the first call only primes the counter
+        while True:
+            await self._send("heartbeat", {
+                "running": len(self.jobs),
+                "cpu_percent": psutil.cpu_percent(None),
+                "mem_free_mb": psutil.virtual_memory().available // MiB,
+            })
+            await asyncio.sleep(interval)

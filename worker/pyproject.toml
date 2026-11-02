@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Worker agent for the orchestration platform"
 requires-python = ">=3.11"
 dependencies = [
+    "docker==7.1.0",
     "psutil==7.0.0",
     "websockets==15.0.1",
 ]

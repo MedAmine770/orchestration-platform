@@ -18,11 +18,12 @@ from pathlib import Path
 
 from .agent import EXIT_CONFIG, Config, FatalError, run
 from .capabilities import detect, load_profile
+from .runtimes import make_runtime
 
 log = logging.getLogger("orch_worker")
 
 
-async def _run_until_signalled(config: Config) -> None:
+async def _run_until_signalled(config: Config, runtime) -> None:
     """Runs the agent; SIGTERM (docker stop) or SIGINT cancels it, which closes
     the WebSocket with a normal close frame instead of dropping it."""
     task = asyncio.current_task()
@@ -30,7 +31,7 @@ async def _run_until_signalled(config: Config) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, task.cancel)
     try:
-        await run(config)
+        await run(config, runtime=runtime)
     except asyncio.CancelledError:
         log.info("signal received; disconnected")
 
@@ -72,10 +73,16 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     log.info("capabilities: %s", capabilities)
+    runtime_name = capabilities["runtimes"][0]
+    try:
+        runtime = make_runtime(runtime_name)
+    except Exception as e:  # e.g. no reachable Docker daemon
+        log.error("cannot use the %s runtime: %s", runtime_name, e)
+        return EXIT_CONFIG
     config = Config(url=args.coordinator, token=token, node_id=args.node_id,
                     slots=args.slots, capabilities=capabilities)
     try:
-        asyncio.run(_run_until_signalled(config))
+        asyncio.run(_run_until_signalled(config, runtime))
     except FatalError as e:
         log.error("%s; exiting", e)
         return e.exit_code
