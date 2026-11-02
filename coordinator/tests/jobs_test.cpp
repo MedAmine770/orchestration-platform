@@ -3,8 +3,10 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -55,6 +57,17 @@ orch::protocol::JobSpec spec(Accelerator accelerator = Accelerator::cpu) {
 
 class JobsTest : public ::testing::Test {
   protected:
+    // Assigned field by field: GCC warns on designated initializers that leave
+    // fields out (-Wmissing-field-initializers).
+    static orch::Submission submission(std::string id, orch::protocol::JobSpec s,
+                                       std::optional<std::string> key = std::nullopt) {
+        orch::Submission sub;
+        sub.id = std::move(id);
+        sub.spec = std::move(s);
+        sub.idempotency_key = std::move(key);
+        return sub;
+    }
+
     orch::metrics::Registry metrics_registry;
     orch::CoordinatorMetrics metrics{metrics_registry};
     orch::Registry registry{metrics};
@@ -74,7 +87,7 @@ class JobsTest : public ::testing::Test {
 
     const Job& submit(const std::string& id, Accelerator accelerator = Accelerator::cpu,
                       Clock::time_point at = {}) {
-        return jobs.submit({.id = id, .spec = spec(accelerator)}, at).job;
+        return jobs.submit(submission(id, spec(accelerator)), at).job;
     }
     const Job& job(const std::string& id) { return *jobs.find(id); }
 
@@ -168,8 +181,8 @@ TEST_F(JobsTest, NonZeroExitAndWorkerErrorsFailWithoutRetry) {
 }
 
 TEST_F(JobsTest, IdempotencyKeyReplayReturnsTheOriginalJob) {
-    auto first = jobs.submit({.id = "j1", .spec = spec(), .idempotency_key = "k"}, t0);
-    auto replay = jobs.submit({.id = "j2", .spec = spec(), .idempotency_key = "k"}, t0);
+    auto first = jobs.submit(submission("j1", spec(), "k"), t0);
+    auto replay = jobs.submit(submission("j2", spec(), "k"), t0);
     EXPECT_TRUE(first.created);
     EXPECT_FALSE(replay.created);
     EXPECT_EQ(replay.job.id, "j1");

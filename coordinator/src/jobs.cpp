@@ -267,7 +267,10 @@ void Jobs::place(Job& job, const NodeId& node, Clock::time_point now) {
     ++job.attempt;
     job.node = node;
     job.deadline = now + config_.ack_timeout;
-    job.attempts.push_back(Attempt{.number = job.attempt, .node = node, .assigned_at = now});
+    Attempt& attempt = job.attempts.emplace_back();
+    attempt.number = job.attempt;
+    attempt.node = node;
+    attempt.assigned_at = now;
     registry_.place(node, job.id);
     set_state(job, JobState::assigned);
     effects_.push_back(SendAssign{node, protocol::Assign{{job.id, job.attempt}, job.spec}});
