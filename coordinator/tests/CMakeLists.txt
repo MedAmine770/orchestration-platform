@@ -3,6 +3,7 @@ find_package(Threads REQUIRED)
 include(GoogleTest)
 
 add_executable(orch_tests
+    jobs_test.cpp
     metrics_test.cpp
     protocol_test.cpp
     scheduler_test.cpp

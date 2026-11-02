@@ -30,7 +30,8 @@ class CoordinatorMetrics {
         std::string_view outcome) const;  // succeeded, failed, lost, cancelled
     metrics::Counter& requeues(
         std::string_view reason) const;  // node_dead, ack_timeout, start_timeout
-    metrics::Counter& stale_messages(std::string_view type) const;  // ack, started, finished
+    metrics::Counter& stale_messages(
+        std::string_view type) const;  // ack, reject, started, finished
 
   private:
     template <typename T>

@@ -143,7 +143,8 @@ One policy, **least-loaded with capability matching**, behind an interface:
 struct PlacementPolicy {
     virtual ~PlacementPolicy() = default;
     // Returns the chosen node, or nullopt if no feasible node has a free slot.
-    virtual std::optional<NodeId> place(const JobSpec&, std::span<const NodeView>) const = 0;
+    virtual std::optional<NodeId> place(const JobSpec&, const std::set<NodeId>& rejected_by,
+                                        const std::map<NodeId, Node>& nodes) const = 0;
 };
 ```
 
@@ -176,13 +177,19 @@ visible as a job that stays `QUEUED` in `GET /v1/jobs` while others pass it.
 | `UNSCHEDULABLE` | **No eligible node is connected**; waiting for one to join | — |
 | `ASSIGNED` | `assign` sent; waiting for `ack` | `T_ack` (default 2 s) |
 | `STARTING` | Acked; worker is pulling the image / creating the container | `T_start` (default 120 s) |
-
-An **eligible** node is connected, has the job's required capabilities, and is not in the
-job's `rejected_by` set (§5.3). Both timers are configurable (`--ack-timeout`,
-`--start-timeout`). `T_start` is generous because pulling a large CUDA image can
-take more than a minute.
 | `RUNNING` | Worker reported `started` | none (worker enforces `max_runtime_s`) |
 | `SUCCEEDED` / `FAILED` / `LOST` / `CANCELLED` | Terminal | — |
+
+An **eligible** node is connected (not `DEAD`), has the job's required capabilities, and
+is not in the job's `rejected_by` set (§5.3). Both timers are configurable
+(`--ack-timeout`, `--start-timeout`). `T_start` is generous because pulling a large
+CUDA image can take more than a minute.
+
+The state machine is implemented as pure logic (`jobs`): every event takes the current
+time, and the messages it wants sent come back as effects (`assign`, `cancel`) for the
+network layer to deliver. Timers are one `next_deadline()` plus `tick(now)`, not a
+timer per job. So every transition, timeout and fencing case is unit-tested with no
+sockets and no sleeps.
 
 `QUEUED` vs `UNSCHEDULABLE` separates "waiting for **capacity**" from "waiting for
 **capability**". A CUDA job submitted to a cluster without a CUDA node would otherwise
@@ -397,6 +404,9 @@ monotonic, so a new leader would simply bump it.
 
 - Every interval is measured on the **coordinator's monotonic clock**, so clock skew
   between machines can't distort it.
+- Both are recorded per attempt and start at the job's **latest entry into `QUEUED`**:
+  submit, or a requeue after a reject or failure. Time spent `UNSCHEDULABLE` (no capable
+  node connected at all) is excluded; time waiting for a free slot is included.
 - Reported as p50/p95/p99/max with sample count, load level (submissions/s, worker
   count), and hardware.
 - Dispatch is measured with idle capacity and under backlog; queueing delay under
@@ -429,7 +439,7 @@ Observability is part of the core, not an add-on. The `metrics` module is built 
 | `orch_nodes` | gauge | `health` = `alive` \| `suspect` \| `dead` |
 | `orch_jobs_finished_total` | counter | `outcome` = `succeeded` \| `failed` \| `lost` \| `cancelled` |
 | `orch_requeues_total` | counter | `reason` = `node_dead` \| `ack_timeout` \| `start_timeout` |
-| `orch_stale_messages_total` | counter | `type` (fenced-out `ack` / `started` / `finished`) |
+| `orch_stale_messages_total` | counter | `type` (fenced-out `ack` / `reject` / `started` / `finished`) |
 | `orch_heartbeats_missed_total` | counter | — |
 | `orch_auth_failures_total` | counter | — |
 

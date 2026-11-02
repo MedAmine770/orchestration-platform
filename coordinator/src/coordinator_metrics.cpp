@@ -13,7 +13,7 @@ constexpr std::array<std::string_view, 3> kHealth{"alive", "suspect", "dead"};
 constexpr std::array<std::string_view, 4> kOutcomes{"succeeded", "failed", "lost", "cancelled"};
 constexpr std::array<std::string_view, 3> kRequeueReasons{"node_dead", "ack_timeout",
                                                           "start_timeout"};
-constexpr std::array<std::string_view, 3> kStaleTypes{"ack", "started", "finished"};
+constexpr std::array<std::string_view, 4> kStaleTypes{"ack", "reject", "started", "finished"};
 
 constexpr std::string_view kStartHelp =
     "Seconds from a job being committed as QUEUED until the worker reports started.";
