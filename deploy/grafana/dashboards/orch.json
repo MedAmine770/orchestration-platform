@@ -6,7 +6,7 @@
     "orch"
   ],
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": false,
   "refresh": "5s",
   "time": {
@@ -17,7 +17,7 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Queue wait (QUEUED → assign sent)",
+      "title": "Queue wait (QUEUED → placed)",
       "description": "Estimated from orch_queue_wait_seconds: time spent waiting for a free slot. Over a 1-minute window, so a short burst of jobs stays readable.",
       "gridPos": {
         "x": 0,
@@ -65,8 +65,8 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Dispatch latency (assign sent → ack)",
-      "description": "Estimated from orch_dispatch_latency_seconds: coordinator → worker → coordinator round trip for one assignment. Over a 1-minute window.",
+      "title": "Dispatch latency (placed → ack, incl. the write-ahead commit)",
+      "description": "Estimated from orch_dispatch_latency_seconds: from placement through the durable commit and the assign to the worker's ack. Over a 1-minute window.",
       "gridPos": {
         "x": 8,
         "y": 0,

@@ -4,17 +4,22 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/signal_set.hpp>
 
 #include "net/server.hpp"
 #include "orch/coordinator_metrics.hpp"
+#include "orch/job_record.hpp"
 #include "orch/metrics.hpp"
+#include "orch/store.hpp"
 #include "orch/version.hpp"
 
 namespace {
@@ -30,6 +35,10 @@ constexpr std::string_view kUsage = R"(usage: coordinator [options]
   --suspect-after-ms N      no heartbeat for N ms: no new placements (default 3000)
   --dead-after-ms N         no heartbeat for N ms: node dead, jobs requeued (default 5000)
   --token-file PATH         read the cluster token from PATH
+  --db PATH                 SQLite file for durable job state; without it nothing
+                            survives a restart
+  --recovery-window-ms N    after a restart, time in-flight jobs wait for their
+                            worker to reclaim them (default 10000)
 
 The cluster token comes from --token-file or the CLUSTER_TOKEN environment
 variable. It is never accepted as a flag: command lines are visible to every
@@ -59,8 +68,14 @@ std::string read_token_file(const std::string& path) {
     return token;
 }
 
-orch::net::ServerConfig parse_args(int argc, char** argv) {
-    orch::net::ServerConfig config;
+struct Options {
+    orch::net::ServerConfig server;
+    std::string db_path;
+};
+
+Options parse_args(int argc, char** argv) {
+    Options options;
+    orch::net::ServerConfig& config = options.server;
     std::string token_file;
     for (int i = 1; i < argc; ++i) {
         const std::string_view flag = argv[i];
@@ -89,6 +104,11 @@ orch::net::ServerConfig parse_args(int argc, char** argv) {
                 std::chrono::milliseconds(parse_number(flag, value, 600'000));
         } else if (flag == "--dead-after-ms") {
             config.jobs.dead_after = std::chrono::milliseconds(parse_number(flag, value, 600'000));
+        } else if (flag == "--db") {
+            options.db_path = value;
+        } else if (flag == "--recovery-window-ms") {
+            config.jobs.recovery_window =
+                std::chrono::milliseconds(parse_number(flag, value, 3'600'000));
         } else if (flag == "--token-file") {
             token_file = value;
         } else {
@@ -107,15 +127,15 @@ orch::net::ServerConfig parse_args(int argc, char** argv) {
     if (config.cluster_token.empty()) {
         throw std::invalid_argument("no cluster token: set CLUSTER_TOKEN or pass --token-file");
     }
-    return config;
+    return options;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    orch::net::ServerConfig config;
+    Options options;
     try {
-        config = parse_args(argc, argv);
+        options = parse_args(argc, argv);
     } catch (const std::invalid_argument& e) {
         std::cerr << "coordinator: " << e.what() << "\n\n" << kUsage;
         return 2;
@@ -126,9 +146,35 @@ int main(int argc, char** argv) {
         // sessions) are destroyed with it, after the server they referred to.
         boost::asio::io_context ioc{1};  // concurrency hint: one io thread (DESIGN.md §9)
 
+        const orch::net::ServerConfig& config = options.server;
+
+        // Declared before the server so it outlives it: its destructor commits
+        // what is still queued, and completions only ever reach a stopped ioc.
+        std::optional<orch::Store> store;
+        std::vector<orch::Job> restored;
+        if (!options.db_path.empty()) {
+            store.emplace(options.db_path);
+            for (const std::string& doc : store->load_jobs()) {
+                restored.push_back(orch::decode_job(doc));
+            }
+        } else {
+            std::cerr << "warning: no --db, so job state will not survive a restart\n";
+        }
+
         orch::metrics::Registry registry;
         orch::CoordinatorMetrics metrics(registry);
-        orch::net::Server server(ioc, config, registry, metrics);
+        orch::net::Server server(ioc, config, registry, metrics, store ? &*store : nullptr);
+        if (!restored.empty()) {
+            std::cerr << "restored " << restored.size() << " jobs from " << options.db_path << '\n';
+            server.restore(std::move(restored));
+        }
+        if (store) {
+            store->start(
+                [&ioc](orch::Store::Task task) { boost::asio::post(ioc, std::move(task)); },
+                // Fail-stop: the exception leaves ioc.run() and main exits 1,
+                // rather than carrying on with state that is no longer persisted.
+                [](std::string error) { throw std::runtime_error(error); });
+        }
 
         boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&ioc](const boost::system::error_code&, int) { ioc.stop(); });

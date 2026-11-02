@@ -32,8 +32,9 @@ stack you care about.
 | **Hang** | `docker pause` the worker running a job, 5 times | Detection by missed heartbeats (`SUSPECT` 3 s, `DEAD` 5 s) |
 
 Latency definitions are in DESIGN.md §11:
-- **queue wait** is `QUEUED` → `assign` sent;
-- **dispatch** is `assign` sent → `ack`;
+- **queue wait** is `QUEUED` → placed;
+- **dispatch** is placed → `ack`, including the write-ahead commit (fsync) before the
+  `assign` goes out (DESIGN.md §8.2);
 - **start** is `QUEUED` → `started`.
 
 Jobs are `alpine:3.20 true` (cached) and `busybox:1.37 true` (cold).

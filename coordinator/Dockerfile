@@ -29,6 +29,8 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/release/coordinator /usr/local/bin/coordinator
+# Where compose.yaml mounts the database volume; owned by the runtime user.
+RUN mkdir -p /var/lib/orch && chown ubuntu:ubuntu /var/lib/orch
 USER ubuntu
 EXPOSE 8080
 HEALTHCHECK --interval=2s --timeout=2s --retries=15 \

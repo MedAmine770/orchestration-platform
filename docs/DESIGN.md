@@ -245,8 +245,7 @@ image not allowed, draining), never for transient ones. The scheduler only place
 nodes with a free slot. If a slot race does happen, the worker queues the job locally
 rather than rejecting it.
 
-`rejected_by` is not a separate column: it is rebuilt from the `reject` rows in
-`job_events` (§8.1), so it survives restarts.
+`rejected_by` is part of the job's durable record (§8.1), so it survives restarts.
 
 When `retries_used > max_retries`, the job becomes `LOST` with the last reason recorded.
 
@@ -334,8 +333,17 @@ this message rate.
 ### 8.1 Store
 
 SQLite in WAL mode, `synchronous=FULL`, one connection owned by the store thread.
-Tables: `jobs` (current state) and `job_events` (append-only transition log, also
-used for attempt history).
+Tables:
+- `jobs`: one row per job. The whole job (spec, state, attempt, retry budget,
+  `rejected_by`, every attempt with its latencies) is one versioned JSON document,
+  next to the columns that are queried (`id`, `seq`, `state`, `idempotency_key`).
+  Monotonic-clock times are not stored; they mean nothing to another process.
+- `job_events`: an append-only history, one row per state transition with wall-clock
+  time, attempt, node and reason. It is for people (debugging, audits); recovery reads
+  only `jobs`.
+
+The core reports what each event changed (`Jobs::take_changes()`: the changed jobs and
+their transitions), and the shell turns that into one batch of rows.
 
 ### 8.2 Write-ahead rule
 
@@ -345,8 +353,17 @@ A state change is committed **before** anyone outside the coordinator can observ
 - `assign` is sent only after `ASSIGNED (attempt = n)` commits. Otherwise a crash right
   after sending could forget the assignment and run the job twice under the same attempt.
 
-That fsync sits on the dispatch path, and its cost is **included** in dispatch latency.
-Close-together writes are group-committed in one transaction to amortise it.
+That fsync sits on the dispatch path, and its cost is **included** in dispatch latency:
+queue wait ends when the scheduler places the job, and dispatch starts there, so it
+covers the commit, the send and the worker's ack (§11).
+
+Implementation: every event's changes become one batch, which goes into an **outbox**
+with that event's messages and API reply. Outbox entries leave strictly in order, each
+only once its batch is committed; an event that changed nothing still waits behind
+earlier ones. The store thread takes everything that queued up during the previous
+commit into one transaction (**group commit**), so one fsync covers many events under
+load. If a commit fails, the coordinator exits (fail-stop) rather than carry on with
+state it can no longer persist.
 
 ### 8.3 Restart recovery
 
@@ -357,6 +374,18 @@ Close-together writes are group-committed in one transaction to amortise it.
    `(job_id, attempt)` resumes ownership.
 3. When the window closes, unclaimed jobs are handled as infrastructure failures (§5.3).
    A worker that reconnects later is fenced out (§6).
+
+Details:
+- A worker only lists jobs it has accepted, so a reclaimed `ASSIGNED` job counts as
+  acked (its `ack` was lost with the crash).
+- An attempt in flight across the restart records no latencies: they would include
+  the outage.
+- **Worker side:** a `finished` that can't be sent (no connection) is kept and sent
+  after the next `welcome`, together with the `started` of every job still running. A
+  job that finished while the coordinator was down is therefore completed, not rerun.
+  A coordinator that already requeued the job counts these as stale.
+- `--recovery-window-ms` sets the window; the integration test kills the coordinator
+  with `SIGKILL` mid-run and checks that nothing is lost or run twice.
 
 ### 8.4 If the coordinator stays dead
 
@@ -410,8 +439,8 @@ monotonic, so a new leader would simply bump it.
 
 | Metric | From | To |
 |---|---|---|
-| **Queue wait** | job enters `QUEUED` | scheduler places it and sends `assign` |
-| **Dispatch latency** | `assign` sent | coordinator receives `ack` |
+| **Queue wait** | job enters `QUEUED` | scheduler places it |
+| **Dispatch latency** | placement (then commit, then `assign` sent) | coordinator receives `ack` |
 | **Start latency**, cached image | job enters `QUEUED` | coordinator receives `started` |
 | **Start latency**, cold image | same, image removed beforehand | same |
 
@@ -536,6 +565,7 @@ docs/          DESIGN.md
 | D10 | Compose only; no warm pool | Scope fits two weeks |
 | D12 | Prometheus + Grafana required; metrics module built first; README uses exact percentiles from raw samples | Every milestone is observable; histogram quantiles are estimates, raw samples are exact |
 | D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
+| D14 | Persist each job as one JSON document plus an append-only event history, rather than normalised columns rebuilt from events | Recovery is a straight load; the history stays for people. The document is versioned for schema changes |
 
 ## 15. Milestones (~2 weeks)
 

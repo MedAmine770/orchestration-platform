@@ -2,7 +2,9 @@
 
 hello -> welcome -> heartbeats, reconnecting on failure. Each assigned job runs
 in its own task, so a long job never delays a heartbeat, and jobs keep running
-across reconnects: their results go out on whichever connection is current.
+across reconnects. A result that can't be sent (no connection, e.g. while the
+coordinator restarts) is kept and sent after the next welcome, along with the
+`started` of every job still running, in case the coordinator never got it.
 """
 
 from __future__ import annotations
@@ -78,6 +80,8 @@ class Agent:
         self.runtime = runtime
         self.ws = None  # the current connection, if any
         self.jobs: dict[JobKey, asyncio.Task] = {}
+        self.started: dict[JobKey, bool] = {}  # running jobs' image_pulled, for replay
+        self.unsent: list[dict] = []  # `finished` bodies not yet delivered
         # The coordinator only assigns into free slots; if a race ever sends
         # one too many, the job waits here instead of being rejected (§5.3).
         self.slots = asyncio.Semaphore(config.slots)
@@ -126,6 +130,7 @@ class Agent:
             interval = welcome.body["heartbeat_interval_ms"] / 1000
             log.info("connected to %s as %s (heartbeat every %.1fs)",
                      self.config.url, self.config.node_id, interval)
+            await self._replay()
 
             heartbeats = asyncio.create_task(self._heartbeats(interval))
             try:
@@ -135,6 +140,19 @@ class Agent:
                 heartbeats.cancel()
                 with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                     await heartbeats
+
+    async def _replay(self) -> None:
+        """After a reconnect. A coordinator that kept this node's jobs (it
+        restarted and was waiting for us) accepts these; one that already
+        requeued them counts them as stale and answers with cancel."""
+        for (job_id, attempt), image_pulled in list(self.started.items()):
+            await self._send("started", {"job_id": job_id, "attempt": attempt,
+                                         "image_pulled": image_pulled})
+        unsent, self.unsent = self.unsent, []
+        for body in unsent:
+            log.info("job %s attempt %d: delivering its result after reconnecting",
+                     body["job_id"], body["attempt"])
+            await self._send("finished", body)
 
     async def _handle(self, message) -> None:
         if not message.known:
@@ -160,6 +178,7 @@ class Agent:
         ref = {"job_id": key[0], "attempt": key[1]}
 
         async def on_started(image_pulled: bool) -> None:
+            self.started[key] = image_pulled
             await self._send("started", {**ref, "image_pulled": image_pulled})
 
         try:
@@ -179,16 +198,23 @@ class Agent:
             await self._send("finished", {**ref, **result, "run_ms": outcome.run_ms})
         finally:
             self.jobs.pop(key, None)
+            self.started.pop(key, None)
 
     async def _send(self, type_: str, body: dict) -> None:
-        """Sends on the current connection. Without one the message is
-        dropped: the coordinator has already failed this node's jobs."""
+        """Sends on the current connection. Without one, a `finished` is kept
+        for _replay() and anything else is dropped (heartbeats are periodic,
+        and the coordinator times out or reconciles the rest)."""
         ws = self.ws
-        if ws is None:
+        if ws is not None:
+            try:
+                await ws.send(encode(type_, body))
+                return
+            except ConnectionClosed:
+                pass
+        if type_ == "finished":
+            self.unsent.append(body)
+        elif type_ != "heartbeat":
             log.warning("not connected; dropping %s for job %s", type_, body.get("job_id"))
-            return
-        with contextlib.suppress(ConnectionClosed):
-            await ws.send(encode(type_, body))
 
     async def _heartbeats(self, interval: float) -> None:
         psutil.cpu_percent(None)  # the first call only primes the counter

@@ -11,7 +11,6 @@ import re
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -29,10 +28,19 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.timeout(60))
 
 
-@dataclass(frozen=True)
-class Coordinator:
-    port: int
-    token: str
+class CoordinatorProcess:
+    """The real coordinator binary with a SQLite database in tmp_path. It can
+    be killed and started again on the same port and database, as a real
+    restart would be."""
+
+    def __init__(self, tmp_path: Path, extra_args: tuple[str, ...] = ()):
+        self.binary = Path(os.environ.get("ORCH_COORDINATOR_BIN", DEFAULT_BIN))
+        self.token = "integration-test-token"
+        self.db = tmp_path / "orch.db"
+        self.log_path = tmp_path / "coordinator.log"
+        self.extra_args = extra_args
+        self.port = 0  # chosen by the OS on the first start, then kept
+        self.proc: subprocess.Popen | None = None
 
     @property
     def ws_url(self) -> str:
@@ -42,40 +50,50 @@ class Coordinator:
     def http_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
+    def start(self) -> None:
+        with open(self.log_path, "a") as log:
+            self.proc = subprocess.Popen(
+                [str(self.binary), "--bind", "127.0.0.1", "--port", str(self.port),
+                 "--hello-timeout-ms", "300", "--ack-timeout-ms", "300",
+                 "--db", str(self.db), *self.extra_args],
+                env={**os.environ, "CLUSTER_TOKEN": self.token},
+                stdout=subprocess.PIPE,
+                stderr=log,  # a file, not a pipe, so a chatty coordinator can never block
+                text=True,
+            )
+        # The first stdout line is "listening on 127.0.0.1:<port>" (EOF if it crashed).
+        match = re.search(r":(\d+)$", self.proc.stdout.readline().strip())
+        if not match:
+            self.proc.kill()
+            self.proc.wait()
+            pytest.fail(f"coordinator did not start:\n{self.log_path.read_text()}")
+        self.port = int(match.group(1))
+
+    def kill(self) -> None:
+        """SIGKILL: no shutdown code runs, as in a crash or power loss."""
+        self.proc.kill()
+        self.proc.wait()
+
+    def stop(self) -> None:
+        """SIGTERM, which must exit 0: under ASan, a memory error makes it fail."""
+        self.proc.send_signal(signal.SIGTERM)
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+            pytest.fail(f"coordinator ignored SIGTERM:\n{self.log_path.read_text()}")
+        assert self.proc.returncode == 0, (
+            f"coordinator exited with {self.proc.returncode}:\n{self.log_path.read_text()}"
+        )
+
 
 @pytest.fixture
 def coordinator(tmp_path):
-    binary = Path(os.environ.get("ORCH_COORDINATOR_BIN", DEFAULT_BIN))
-    token = "integration-test-token"
-    log_path = tmp_path / "coordinator.log"
-    with open(log_path, "w") as log:
-        proc = subprocess.Popen(
-            [str(binary), "--bind", "127.0.0.1", "--port", "0", "--hello-timeout-ms", "300",
-             "--ack-timeout-ms", "300"],
-            env={**os.environ, "CLUSTER_TOKEN": token},
-            stdout=subprocess.PIPE,
-            stderr=log,  # a file, not a pipe, so a chatty coordinator can never block
-            text=True,
-        )
-    # The first stdout line is "listening on 127.0.0.1:<port>" (EOF if it crashed).
-    match = re.search(r":(\d+)$", proc.stdout.readline().strip())
-    if not match:
-        proc.kill()
-        proc.wait()
-        pytest.fail(f"coordinator did not start:\n{log_path.read_text()}")
-
-    yield Coordinator(port=int(match.group(1)), token=token)
-
-    proc.send_signal(signal.SIGTERM)
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        pytest.fail(f"coordinator ignored SIGTERM:\n{log_path.read_text()}")
-    assert proc.returncode == 0, (
-        f"coordinator exited with {proc.returncode}:\n{log_path.read_text()}"
-    )
+    process = CoordinatorProcess(tmp_path)
+    process.start()
+    yield process
+    process.stop()
 
 
 @pytest.fixture

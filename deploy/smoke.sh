@@ -95,6 +95,14 @@ expect "it was placed on worker-sim-cuda" equals \
     "$(curl -fsS "http://127.0.0.1:8080/v1/jobs/$gpu" | jq -r '.attempts[0].node')" worker-sim-cuda
 check "latency histograms reach Prometheus" prom_equals 'orch_dispatch_latency_seconds_count' 2
 
+# Job state lives in the orch-data volume: it must survive a coordinator crash.
+compose kill coordinator >/dev/null 2>&1
+compose start coordinator >/dev/null 2>&1
+check "coordinator back after a crash" curl -fsS http://127.0.0.1:8080/healthz
+check "jobs survive a coordinator crash" equals_cmd "$job" succeeded
+check "workers reconnect to the restarted coordinator" \
+    prom_equals 'orch_nodes{health="alive"}' 3
+
 # The live endpoint, not just the metrics_sample fixture, passes Prometheus's linter.
 curl -fsS http://127.0.0.1:8080/metrics | compose exec -T prometheus promtool check metrics
 echo "ok: live /metrics passes promtool"

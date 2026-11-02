@@ -37,8 +37,11 @@ services:
   coordinator:
     build: ./coordinator
     image: orch-coordinator:dev
-    command: ["--token-file", "/run/secrets/cluster_token"]
+    # Job state survives restarts in the orch-data volume
+    # (`docker compose down -v` wipes it).
+    command: ["--token-file", "/run/secrets/cluster_token", "--db", "/var/lib/orch/orch.db"]
     secrets: [cluster_token]
+    volumes: ["orch-data:/var/lib/orch"]
     ports: ["127.0.0.1:8080:8080"]
     restart: "no"
 
@@ -84,3 +87,6 @@ services:
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports: ["127.0.0.1:3000:3000"]
     depends_on: [prometheus]
+
+volumes:
+  orch-data:

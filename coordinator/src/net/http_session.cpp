@@ -1,6 +1,8 @@
 #include "net/http_session.hpp"
 
 #include <chrono>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -49,13 +51,24 @@ void HttpSession::on_read(beast::error_code ec) {
     }
     if (ec) return;  // timeout, reset or malformed request: just drop the connection
 
-    Request req = parser_->release();
-    if (websocket::is_upgrade(req) && path_of(req.target()) == kWorkersPath) {
+    auto req = std::make_shared<Request>(parser_->release());
+    if (websocket::is_upgrade(*req) && path_of(req->target()) == kWorkersPath) {
         // The WebSocket session takes over the socket; this session ends here.
-        std::make_shared<WorkerSession>(stream_.release_socket(), server_)->run(std::move(req));
+        std::make_shared<WorkerSession>(stream_.release_socket(), server_)->run(std::move(*req));
         return;
     }
-    write(route(req));
+    // API replies arrive once the request's changes are durable; nothing is
+    // read from this connection meanwhile, so responses stay in order.
+    server_.handle_api(req->method_string(), req->target(), req->body(),
+                       [self = shared_from_this(), req](std::optional<ApiResponse> api) {
+                           if (!api) return self->write(self->route(*req));
+                           Response res{http::int_to_status(api->status), req->version()};
+                           res.keep_alive(req->keep_alive());
+                           res.set(http::field::content_type, "application/json");
+                           res.body() = std::move(api->body);
+                           res.prepare_payload();
+                           self->write(std::move(res));
+                       });
 }
 
 HttpSession::Response HttpSession::route(const Request& req) const {
@@ -70,10 +83,6 @@ HttpSession::Response HttpSession::route(const Request& req) const {
         res.prepare_payload();
         return res;
     };
-
-    if (auto api = server_.handle_api(req.method_string(), req.target(), req.body())) {
-        return reply(http::int_to_status(api->status), "application/json", std::move(api->body));
-    }
 
     const bool known = path == "/healthz" || path == "/metrics" || path == kWorkersPath;
     if (!known) return reply(http::status::not_found, "text/plain", "not found\n");
