@@ -37,6 +37,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(boost_hash2 CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 # Core library: everything except main(), so tests link the same code the binary runs.
 add_library(orch_core
@@ -50,12 +51,13 @@ add_library(orch_core
     src/protocol.cpp
     src/registry.cpp
     src/scheduler.cpp
+    src/store.cpp
     src/version.cpp)
 # include/ is the public API; src/ holds internal headers such as net/server.hpp.
 target_include_directories(orch_core PUBLIC include PRIVATE src)
 target_link_libraries(orch_core
     PUBLIC orch_options Boost::beast Threads::Threads
-    PRIVATE nlohmann_json::nlohmann_json Boost::hash2)  # kept out of our public headers
+    PRIVATE nlohmann_json::nlohmann_json Boost::hash2 unofficial::sqlite3::sqlite3)  # kept out of our public headers
 
 add_executable(coordinator src/main.cpp)
 target_include_directories(coordinator PRIVATE src)

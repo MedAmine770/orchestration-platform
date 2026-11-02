@@ -8,6 +8,7 @@ add_executable(orch_tests
     metrics_test.cpp
     protocol_test.cpp
     scheduler_test.cpp
+    store_test.cpp
     version_test.cpp)
 target_link_libraries(orch_tests
     PRIVATE orch_core GTest::gtest_main Threads::Threads nlohmann_json::nlohmann_json)
