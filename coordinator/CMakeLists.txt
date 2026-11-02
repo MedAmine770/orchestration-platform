@@ -46,6 +46,8 @@ add_library(orch_core
     src/net/server.cpp
     src/net/worker_session.cpp
     src/protocol.cpp
+    src/registry.cpp
+    src/scheduler.cpp
     src/version.cpp)
 # include/ is the public API; src/ holds internal headers such as net/server.hpp.
 target_include_directories(orch_core PUBLIC include PRIVATE src)
