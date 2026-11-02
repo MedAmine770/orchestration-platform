@@ -58,9 +58,11 @@ grafana_queries_prometheus() {  # as the anonymous viewer, like a dashboard pane
 worker_container() { compose ps --all --quiet "$1"; }
 inspect() { docker inspect -f "$2" "$(worker_container "$1")"; }
 equals() { [ "$1" = "$2" ]; }
+equals_cmd() { [ "$(job_state "$1")" = "$2" ]; }  # re-evaluated on every retry
 
 workers_never_restart() {
     equals "$(inspect worker-cpu '{{.HostConfig.RestartPolicy.Name}}')" no &&
+        equals "$(inspect worker-cpu-2 '{{.HostConfig.RestartPolicy.Name}}')" no &&
         equals "$(inspect worker-sim-cuda '{{.HostConfig.RestartPolicy.Name}}')" no
 }
 
@@ -74,9 +76,24 @@ compose up --detach --wait --wait-timeout 300
 
 check "coordinator /healthz" curl -fsS http://127.0.0.1:8080/healthz
 check "Prometheus scrapes the coordinator" prom_equals 'up{job="coordinator"}' 1
-check "both workers connected (seen through Prometheus)" prom_equals 'orch_nodes{health="alive"}' 2
+check "all three workers connected (seen through Prometheus)" \
+    prom_equals 'orch_nodes{health="alive"}' 3
 check "Grafana provisioned the 6-panel dashboard" dashboard_has_six_panels
 check "Grafana queries Prometheus" grafana_queries_prometheus
+
+submit_job() {  # prints the new job's id
+    curl -fsS http://127.0.0.1:8080/v1/jobs -d "$1" | jq -r .job_id
+}
+job_state() { curl -fsS "http://127.0.0.1:8080/v1/jobs/$1" | jq -r .state; }
+
+job=$(submit_job '{"image": "alpine:3.20", "command": ["sh", "-c", "echo smoke; exit 0"]}')
+check "a container job runs to success" equals_cmd "$job" succeeded
+gpu=$(submit_job '{"image": "alpine:3.20", "command": ["true"],
+                   "requirements": {"accelerator": "cuda", "min_gpu_mem_mb": 16384}}')
+check "a CUDA job runs on the simulated CUDA node" equals_cmd "$gpu" succeeded
+expect "it was placed on worker-sim-cuda" equals \
+    "$(curl -fsS "http://127.0.0.1:8080/v1/jobs/$gpu" | jq -r '.attempts[0].node')" worker-sim-cuda
+check "latency histograms reach Prometheus" prom_equals 'orch_dispatch_latency_seconds_count' 2
 
 # The live endpoint, not just the metrics_sample fixture, passes Prometheus's linter.
 curl -fsS http://127.0.0.1:8080/metrics | compose exec -T prometheus promtool check metrics
@@ -87,7 +104,7 @@ expect "workers have restart policy \"no\"" workers_never_restart
 # docker stop sends SIGTERM: the agent must close the socket and exit 0.
 compose stop worker-cpu
 expect "worker exits 0 on docker stop" equals "$(inspect worker-cpu '{{.State.ExitCode}}')" 0
-check "coordinator saw the disconnect" prom_equals 'orch_nodes{health="alive"}' 1
+check "coordinator saw the disconnect" prom_equals 'orch_nodes{health="alive"}' 2
 
 # A wrong token must end the container with the distinct "rejected" code.
 expect "worker with a wrong token exits 3" equals "$(wrong_token_exit_code)" 3

@@ -132,8 +132,8 @@ containers. The README labels the CUDA node as simulated.
 
 In Compose, worker containers mount the host Docker socket and launch jobs as sibling
 containers. That socket is root-equivalent on the host; acceptable for a local demo,
-called out in the README. The mount is added in milestone 5, when workers first run
-jobs; until then they run without it, as a non-root user.
+called out in the README. The worker image defaults to a non-root user; Compose runs
+it as root, since a non-root user with access to the socket would be no safer.
 
 ### 4.3 Scheduling policy
 

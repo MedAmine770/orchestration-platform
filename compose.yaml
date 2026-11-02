@@ -1,4 +1,5 @@
-# Local demo stack: coordinator, two workers, Prometheus, Grafana.
+# Local demo stack: coordinator, three workers, Prometheus, Grafana.
+# README.md has the demo walkthrough.
 #
 #   export CLUSTER_TOKEN="$(openssl rand -hex 32)"
 #   docker compose up --build
@@ -19,6 +20,12 @@ x-worker: &worker
   image: orch-worker:dev
   secrets: [cluster_token]
   depends_on: [coordinator]  # start order only; the agent's backoff covers the rest
+  # Workers start each job as a sibling container through the host's Docker
+  # socket. Anything that can use this socket is root-equivalent on the host,
+  # which is why the worker runs as root here (a non-root user with socket
+  # access would be no safer) and why this stack is for a local demo only.
+  volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+  user: root
   # Never restart. The agent already retries everything worth retrying
   # (coordinator down, network errors) with backoff inside the process. What
   # makes it exit is permanent: bad config (2), rejected token (3), node id
@@ -38,8 +45,17 @@ services:
   worker-cpu:
     <<: *worker
     command: [--coordinator, "ws://coordinator:8080/v1/workers", --node-id, worker-cpu,
-              --profile, /app/profiles/cpu.json, --token-file, /run/secrets/cluster_token]
+              --slots, "2", --profile, /app/profiles/cpu.json,
+              --token-file, /run/secrets/cluster_token]
 
+  worker-cpu-2:
+    <<: *worker
+    command: [--coordinator, "ws://coordinator:8080/v1/workers", --node-id, worker-cpu-2,
+              --slots, "2", --profile, /app/profiles/cpu.json,
+              --token-file, /run/secrets/cluster_token]
+
+  # Advertises a simulated RTX 4090 so CUDA jobs have somewhere to go; it runs
+  # them as ordinary CPU containers.
   worker-sim-cuda:
     <<: *worker
     command: [--coordinator, "ws://coordinator:8080/v1/workers", --node-id, worker-sim-cuda,
