@@ -1,0 +1,70 @@
+# Local demo stack: coordinator, two workers, Prometheus, Grafana.
+#
+#   export CLUSTER_TOKEN="$(openssl rand -hex 32)"
+#   docker compose up --build
+#
+# Grafana: http://localhost:3000   Prometheus: http://localhost:9090
+# Every port is published on 127.0.0.1 only.
+
+name: orch
+
+# The token reaches containers as a file under /run/secrets, never as a flag
+# (visible in ps) or a container environment variable (visible in docker inspect).
+secrets:
+  cluster_token:
+    environment: CLUSTER_TOKEN
+
+x-worker: &worker
+  build: ./worker
+  image: orch-worker:dev
+  secrets: [cluster_token]
+  depends_on: [coordinator]  # start order only; the agent's backoff covers the rest
+  # Never restart. The agent already retries everything worth retrying
+  # (coordinator down, network errors) with backoff inside the process. What
+  # makes it exit is permanent: bad config (2), rejected token (3), node id
+  # taken over (4). Docker restart policies can't filter by exit code, so
+  # "on-failure" would restart those too and recreate the reconnect loop.
+  restart: "no"
+
+services:
+  coordinator:
+    build: ./coordinator
+    image: orch-coordinator:dev
+    command: ["--token-file", "/run/secrets/cluster_token"]
+    secrets: [cluster_token]
+    ports: ["127.0.0.1:8080:8080"]
+    restart: "no"
+
+  worker-cpu:
+    <<: *worker
+    command: [--coordinator, "ws://coordinator:8080/v1/workers", --node-id, worker-cpu,
+              --profile, /app/profiles/cpu.json, --token-file, /run/secrets/cluster_token]
+
+  worker-sim-cuda:
+    <<: *worker
+    command: [--coordinator, "ws://coordinator:8080/v1/workers", --node-id, worker-sim-cuda,
+              --profile, /app/profiles/sim-cuda.json, --token-file, /run/secrets/cluster_token]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes: ["./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [coordinator]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      # Anonymous read-only access and no login form: the dashboard opens with
+      # zero clicks, and nothing can be edited except through the committed files.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/orch.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus]

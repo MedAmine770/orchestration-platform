@@ -31,6 +31,28 @@ jobs:
       # Includes the shared protocol vectors, so codec drift fails here.
       - run: python -m pytest -q worker/tests
 
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      # Builds the Compose images with layers cached in GitHub's cache, so the
+      # vcpkg dependency layer is reused until coordinator/vcpkg.json changes.
+      # worker-sim-cuda shares worker-cpu's image.
+      - uses: docker/bake-action@v6
+        with:
+          source: .
+          files: compose.yaml
+          targets: coordinator,worker-cpu
+          load: true
+          set: |
+            coordinator.cache-from=type=gha,scope=coordinator
+            coordinator.cache-to=type=gha,scope=coordinator,mode=max
+            worker-cpu.cache-from=type=gha,scope=worker
+            worker-cpu.cache-to=type=gha,scope=worker,mode=max
+      - name: Smoke test
+        run: deploy/smoke.sh
+
   coordinator:
     name: coordinator (${{ matrix.os }}, ${{ matrix.preset }})
     runs-on: ${{ matrix.os }}
@@ -105,7 +127,7 @@ jobs:
         env:
           ORCH_COORDINATOR_BIN: coordinator/build/debug-asan/coordinator
         run: |
-          pip install -r tests/integration/requirements.txt
+          pip install -r tests/integration/requirements.txt -e worker
           python -m pytest -q tests/integration
 
       # Validate our hand-written exposition format with Prometheus's own

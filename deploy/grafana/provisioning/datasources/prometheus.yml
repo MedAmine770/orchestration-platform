@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus  # referenced by every panel in dashboards/orch.json
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match the scrape interval so $__rate_interval covers enough samples.
+      timeInterval: 1s

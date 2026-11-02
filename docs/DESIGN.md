@@ -114,6 +114,17 @@ so the state machine is tested deterministically with no sockets and no sleeps.
 - Tasks: connection (reconnect with exponential backoff + jitter), heartbeats, one task
   per running job. A long job can never delay a heartbeat.
 - Enforces each job's `max_runtime_s`.
+- SIGTERM/SIGINT close the WebSocket with a normal close frame and exit 0, so
+  `docker stop` disconnects cleanly.
+
+**Exit codes and restarts.** The agent retries everything retrying can fix
+(coordinator down, network errors) itself, with backoff. It exits only when retrying
+can't help, each with its own code: `2` bad configuration, `3` token rejected (close
+1008), `4` node id taken over by another worker (close 4000); `1` is an unexpected
+error. A supervisor must not restart on 2–4: the new process would fail the same way,
+and for 4000 two workers would keep evicting each other. Docker restart policies can't
+filter by exit code, so Compose runs workers with `restart: "no"`; a stopped worker
+stays visible in `docker compose ps -a` with its exit code.
 
 **Hardware plan (Mac only):** one native worker on the Mac host advertises real MPS;
 in Compose, a `cpu` worker and a `sim-cuda` worker advertise their profiles and run CPU
@@ -121,7 +132,8 @@ containers. The README labels the CUDA node as simulated.
 
 In Compose, worker containers mount the host Docker socket and launch jobs as sibling
 containers. That socket is root-equivalent on the host; acceptable for a local demo,
-called out in the README.
+called out in the README. The mount is added in milestone 5, when workers first run
+jobs; until then they run without it, as a non-root user.
 
 ### 4.3 Scheduling policy
 
@@ -439,7 +451,13 @@ and 50 ms from 75 ms. The tail goes to 120 s because a cold image pull can take 
 `docker compose up` starts the coordinator, workers, **Prometheus** (scraping the
 coordinator every 1 s) and **Grafana**. The datasource and dashboard are provisioned
 from files committed under `deploy/grafana/`, so the dashboard opens with zero clicks
-(anonymous viewer access, local only).
+(anonymous viewer access, local only). The token reaches containers as a Compose
+secret file, never as a flag or a container environment variable.
+
+`deploy/smoke.sh` (also a CI job) brings the stack up and checks the path end to end:
+Prometheus scrapes the coordinator and sees both workers, Grafana has the dashboard and
+can query Prometheus, the live `/metrics` passes `promtool check metrics`, and a worker
+exits 0 on `docker stop` and 3 with a wrong token.
 
 ### 12.3 Dashboard (6 panels)
 
@@ -465,7 +483,8 @@ coordinator/   src/  include/  tests/  CMakeLists.txt  vcpkg.json  CMakePresets.
 worker/        agent/  tests/  profiles/  pyproject.toml
 tests/         integration/   (Python: start coordinator + workers, kill, restart)
 bench/         scripts + committed results
-deploy/        docker-compose.yml  prometheus.yml  grafana/ (provisioning + dashboard JSON)
+compose.yaml   coordinator, workers, Prometheus, Grafana (`docker compose up`)
+deploy/        prometheus.yml  grafana/ (provisioning + dashboard JSON)  smoke.sh
 docs/          DESIGN.md
 ```
 

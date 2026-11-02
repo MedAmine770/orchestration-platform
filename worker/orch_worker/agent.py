@@ -21,10 +21,17 @@ log = logging.getLogger("orch_worker")
 MAX_FRAME_BYTES = 64 * 1024  # proto/PROTOCOL.md "Transport"
 HANDSHAKE_TIMEOUT_S = 10
 
-# Close codes that retrying cannot fix (proto/PROTOCOL.md "Closing").
+# Process exit codes. A supervisor must not restart after EXIT_REJECTED or
+# EXIT_REPLACED: the new process would fail the same way (compose.yaml).
+EXIT_CONFIG = 2
+EXIT_REJECTED = 3
+EXIT_REPLACED = 4
+
+# Close codes that retrying cannot fix (proto/PROTOCOL.md "Closing"), with the
+# exit code each one ends the process with.
 FATAL_CLOSE_CODES = {
-    1008: "rejected by the coordinator",
-    4000: "another worker connected with the same node id",
+    1008: ("rejected by the coordinator", EXIT_REJECTED),
+    4000: ("another worker connected with the same node id", EXIT_REPLACED),
 }
 
 
@@ -40,6 +47,10 @@ class Config:
 class FatalError(Exception):
     """The coordinator refused us in a way reconnecting won't fix."""
 
+    def __init__(self, message: str, exit_code: int):
+        super().__init__(message)
+        self.exit_code = exit_code
+
 
 async def run(config: Config, backoff: Backoff | None = None) -> None:
     """Runs until cancelled or a FatalError."""
@@ -50,9 +61,8 @@ async def run(config: Config, backoff: Backoff | None = None) -> None:
         except ConnectionClosed as e:
             code = e.rcvd.code if e.rcvd else None
             if code in FATAL_CLOSE_CODES:
-                raise FatalError(
-                    f"{FATAL_CLOSE_CODES[code]} (close {code}: {e.rcvd.reason})"
-                ) from None
+                why, exit_code = FATAL_CLOSE_CODES[code]
+                raise FatalError(f"{why} (close {code}: {e.rcvd.reason})", exit_code) from None
             log.warning("connection closed (code %s)", code)
         except (OSError, TimeoutError, InvalidHandshake, ProtocolError) as e:
             log.warning("coordinator unavailable: %s", e)

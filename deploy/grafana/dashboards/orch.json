@@ -1,0 +1,98 @@
+{
+  "uid": "orch",
+  "title": "Orchestration platform",
+  "description": "The six panels of DESIGN.md §12.3. Latency quantiles are histogram_quantile() estimates; the README's exact percentiles come from the bench's raw samples.",
+  "tags": ["orch"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Dispatch latency (QUEUED commit → ack)",
+      "description": "Estimated from orch_dispatch_latency_seconds; can differ from exact percentiles by up to one bucket width.",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(orch_dispatch_latency_seconds_bucket[$__rate_interval])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(orch_dispatch_latency_seconds_bucket[$__rate_interval])))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(orch_dispatch_latency_seconds_bucket[$__rate_interval])))" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Start latency (QUEUED commit → started), cached vs pulled image",
+      "description": "Estimated from orch_start_latency_seconds, split by whether the worker had to pull the image.",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50 {{image}}", "expr": "histogram_quantile(0.50, sum by (le, image) (rate(orch_start_latency_seconds_bucket[$__rate_interval])))" },
+        { "refId": "B", "legendFormat": "p95 {{image}}", "expr": "histogram_quantile(0.95, sum by (le, image) (rate(orch_start_latency_seconds_bucket[$__rate_interval])))" },
+        { "refId": "C", "legendFormat": "p99 {{image}}", "expr": "histogram_quantile(0.99, sum by (le, image) (rate(orch_start_latency_seconds_bucket[$__rate_interval])))" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Jobs by state",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "custom": { "stacking": { "mode": "normal" }, "fillOpacity": 30 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{state}}", "expr": "sum by (state) (orch_jobs)" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Nodes by health",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{health}}", "expr": "sum by (health) (orch_nodes)" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Throughput: jobs finished and requeued per second",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "finished {{outcome}}", "expr": "sum by (outcome) (rate(orch_jobs_finished_total[$__rate_interval]))" },
+        { "refId": "B", "legendFormat": "requeued {{reason}}", "expr": "sum by (reason) (rate(orch_requeues_total[$__rate_interval]))" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Fault signals (per minute)",
+      "description": "Fenced-out stale messages, missed heartbeat deadlines, and rejected worker tokens.",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "legendFormat": "stale {{type}}", "expr": "sum by (type) (increase(orch_stale_messages_total[1m]))" },
+        { "refId": "B", "legendFormat": "missed heartbeats", "expr": "sum(increase(orch_heartbeats_missed_total[1m]))" },
+        { "refId": "C", "legendFormat": "auth failures", "expr": "sum(increase(orch_auth_failures_total[1m]))" }
+      ]
+    }
+  ]
+}
