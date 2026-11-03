@@ -30,8 +30,8 @@ std::string_view path_of(std::string_view target) { return target.substr(0, targ
 
 }  // namespace
 
-HttpSession::HttpSession(boost::asio::ip::tcp::socket&& socket, Server& server)
-    : stream_(std::move(socket)), server_(server) {}
+HttpSession::HttpSession(boost::asio::ip::tcp::socket&& socket, Server& server, Listener listener)
+    : stream_(std::move(socket)), server_(server), listener_(listener) {}
 
 void HttpSession::run() { read(); }
 
@@ -52,11 +52,13 @@ void HttpSession::on_read(beast::error_code ec) {
     if (ec) return;  // timeout, reset or malformed request: just drop the connection
 
     auto req = std::make_shared<Request>(parser_->release());
-    if (websocket::is_upgrade(*req) && path_of(req->target()) == kWorkersPath) {
+    if (listener_ != Listener::admin && websocket::is_upgrade(*req) &&
+        path_of(req->target()) == kWorkersPath) {
         // The WebSocket session takes over the socket; this session ends here.
         std::make_shared<WorkerSession>(stream_.release_socket(), server_)->run(std::move(*req));
         return;
     }
+    if (listener_ == Listener::workers) return write(route(*req));  // no REST here
     // API replies arrive once the request's changes are durable; nothing is
     // read from this connection meanwhile, so responses stay in order.
     server_.handle_api(req->method_string(), req->target(), req->body(),
@@ -84,7 +86,9 @@ HttpSession::Response HttpSession::route(const Request& req) const {
         return res;
     };
 
-    const bool known = path == "/healthz" || path == "/metrics" || path == kWorkersPath;
+    const bool known = path == "/healthz" ||
+                       (path == "/metrics" && listener_ != Listener::workers) ||
+                       (path == kWorkersPath && listener_ != Listener::admin);
     if (!known) return reply(http::status::not_found, "text/plain", "not found\n");
     if (req.method() != http::verb::get) {
         return reply(http::status::method_not_allowed, "text/plain", "method not allowed\n");

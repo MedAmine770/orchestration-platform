@@ -28,6 +28,10 @@ constexpr std::string_view kUsage = R"(usage: coordinator [options]
 
   --bind ADDR               listen address (default 0.0.0.0)
   --port N                  listen port; 0 picks a free one (default 8080)
+  --admin-port N            serve REST and /metrics on this port instead, leaving
+                            --port with only the worker WebSocket and /healthz;
+                            0 picks a free one. REST has no auth, so keep this
+                            port private
   --hello-timeout-ms N      time a worker has to send hello (default 5000)
   --heartbeat-interval-ms N heartbeat interval sent to workers (default 1000)
   --ack-timeout-ms N        T_ack: time a worker has to ack an assign (default 2000)
@@ -89,6 +93,8 @@ Options parse_args(int argc, char** argv) {
             config.bind_address = value;
         } else if (flag == "--port") {
             config.port = static_cast<unsigned short>(parse_number(flag, value, 65535));
+        } else if (flag == "--admin-port") {
+            config.admin_port = static_cast<unsigned short>(parse_number(flag, value, 65535));
         } else if (flag == "--hello-timeout-ms") {
             config.hello_timeout = std::chrono::milliseconds(parse_number(flag, value, 600'000));
         } else if (flag == "--heartbeat-interval-ms") {
@@ -182,6 +188,9 @@ int main(int argc, char** argv) {
         server.start();
         // Tests parse this line to learn the port when started with --port 0.
         std::cout << "listening on " << config.bind_address << ":" << server.port() << std::endl;
+        if (const auto admin = server.admin_port()) {
+            std::cout << "admin listening on " << config.bind_address << ":" << *admin << std::endl;
+        }
         std::cerr << "orch coordinator " << orch::version() << " started\n";
 
         ioc.run();

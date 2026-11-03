@@ -328,6 +328,16 @@ this message rate.
   a job placed on the node that the worker doesn't report was lost with its previous
   process and is requeued as an infrastructure failure.
 
+### 7.4 Separating the public and private surfaces
+
+By default one port serves everything. REST has no auth (§1), so that port can't be
+exposed to workers on an untrusted network without also exposing job submission.
+
+`--admin-port` splits it: REST and `/metrics` move to the admin port, and `--port` keeps
+only the worker WebSocket. `/healthz` stays on both, for container health checks. The
+admin port doesn't accept worker upgrades, so each port has exactly one job, and a
+deployment can route `--port` to the outside and never publish the admin port.
+
 ## 8. Persistence and recovery
 
 ### 8.1 Store
@@ -565,6 +575,7 @@ docs/          DESIGN.md
 | D10 | Compose only; no warm pool | Scope fits two weeks |
 | D12 | Prometheus + Grafana required; metrics module built first; README uses exact percentiles from raw samples | Every milestone is observable; histogram quantiles are estimates, raw samples are exact |
 | D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
+| D15 | Optional `--admin-port` to split REST and `/metrics` from the worker WebSocket | Lets workers on an untrusted network connect without exposing unauthenticated REST (§7.4). The default stays one port, per D2 |
 | D14 | Persist each job as one JSON document plus an append-only event history, rather than normalised columns rebuilt from events | Recovery is a straight load; the history stays for people. The document is versioned for schema changes |
 
 ## 15. Milestones (~2 weeks)

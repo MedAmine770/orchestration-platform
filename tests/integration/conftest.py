@@ -40,6 +40,7 @@ class CoordinatorProcess:
         self.log_path = tmp_path / "coordinator.log"
         self.extra_args = extra_args
         self.port = 0  # chosen by the OS on the first start, then kept
+        self.admin_port: int | None = None  # with --admin-port in extra_args
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -68,6 +69,8 @@ class CoordinatorProcess:
             self.proc.wait()
             pytest.fail(f"coordinator did not start:\n{self.log_path.read_text()}")
         self.port = int(match.group(1))
+        if "--admin-port" in self.extra_args:
+            self.admin_port = int(re.search(r":(\d+)$", self.proc.stdout.readline().strip()).group(1))
 
     def kill(self) -> None:
         """SIGKILL: no shutdown code runs, as in a crash or power loss."""
