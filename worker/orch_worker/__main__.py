@@ -78,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         runtime = make_runtime(runtime_name)
     except Exception as e:  # e.g. no reachable Docker daemon
         log.error("cannot use the %s runtime: %s", runtime_name, e)
+        if runtime_name == "docker":
+            log.error("to run jobs as native processes with no container, use a profile "
+                      "with \"runtimes\": [\"process\"]")
         return EXIT_CONFIG
     config = Config(url=args.coordinator, token=token, node_id=args.node_id,
                     slots=args.slots, capabilities=capabilities)

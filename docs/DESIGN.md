@@ -111,6 +111,8 @@ so the state machine is tested deterministically with no sockets and no sleeps.
   - `docker`: runs the job's image via the Docker SDK.
   - `process`: runs the command as a native subprocess. Needed because **Docker on
     macOS runs a Linux VM and cannot expose MPS**; real MPS jobs run on the Mac host.
+    It has no isolation, so a node only uses it when its profile asks for it. Otherwise
+    the agent uses `docker`, and exits with code 2 if Docker isn't reachable.
 - Tasks: connection (reconnect with exponential backoff + jitter), heartbeats, one task
   per running job. A long job can never delay a heartbeat.
 - Enforces each job's `max_runtime_s`.
@@ -576,6 +578,7 @@ docs/          DESIGN.md
 | D12 | Prometheus + Grafana required; metrics module built first; README uses exact percentiles from raw samples | Every milestone is observable; histogram quantiles are estimates, raw samples are exact |
 | D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
 | D15 | Optional `--admin-port` to split REST and `/metrics` from the worker WebSocket | Lets workers on an untrusted network connect without exposing unauthenticated REST (§7.4). The default stays one port, per D2 |
+| D16 | `process` runtime only when a profile asks for it; no fallback when Docker is missing | The fallback checked for a `docker` CLI, which the worker image lacks, so a worker with no profile would run jobs unisolated inside a container holding the Docker socket |
 | D14 | Persist each job as one JSON document plus an append-only event history, rather than normalised columns rebuilt from events | Recovery is a straight load; the history stays for people. The document is versioned for schema changes |
 
 ## 15. Milestones (~2 weeks)

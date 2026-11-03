@@ -162,6 +162,9 @@ paced version of the steps above) through [VHS](https://github.com/charmbracelet
 - **REST has no auth.** By default it shares a port with the worker WebSocket. Run the
   coordinator with `--admin-port N` to move REST and `/metrics` to their own port, which
   must stay private; `--port` then serves only workers and `/healthz` (DESIGN.md §7.4).
+- **Jobs only run outside a container if you ask.** A worker uses the `docker` runtime and
+  exits with code 2 if Docker isn't reachable. The `process` runtime, needed for MPS, has
+  no isolation and must be requested in a profile: `"runtimes": ["process"]`.
 - Workers authenticate with a shared token, which reaches containers as a Compose
   secret file, never as a command-line flag or a container environment variable.
   Traffic is plain `ws://` and `http://`; TLS is out of scope (DESIGN.md §1).

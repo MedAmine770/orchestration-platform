@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
 import psutil
@@ -32,7 +31,11 @@ def detect(profile: dict | None = None) -> dict:
     caps = {
         "cpus": os.cpu_count() or 1,
         "mem_mb": psutil.virtual_memory().total // MiB,
-        "runtimes": _runtimes(),
+        # Never detected. Falling back to `process` when Docker looks absent would
+        # run jobs with no container at all, and from a worker image (which has
+        # no docker CLI) inside a container that holds the Docker socket. A node
+        # that wants native processes says so in its profile.
+        "runtimes": ["docker"],
         **_accelerator(),
     }
     if profile:
@@ -59,9 +62,3 @@ def _accelerator() -> dict:
         return {"accelerator": "mps", "gpu_name": "Apple GPU (MPS)"}
     return {"accelerator": "cpu"}
 
-
-def _runtimes() -> list[str]:
-    runtimes = ["process"]
-    if shutil.which("docker"):
-        runtimes.insert(0, "docker")
-    return runtimes
