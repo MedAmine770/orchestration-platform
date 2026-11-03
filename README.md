@@ -196,3 +196,6 @@ deploy/smoke.sh
 ```
 
 CI runs all of the above, plus TSan and a macOS build.
+
+Tagging `v*` publishes multi-arch coordinator and worker images to GHCR
+([`release.yml`](.github/workflows/release.yml)).
