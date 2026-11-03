@@ -2,7 +2,8 @@
 container, `process` runs the command as a native subprocess (needed for MPS,
 which Docker on macOS cannot expose).
 
-A runtime's run() calls on_started(image_pulled) once the work is actually
+run() gets the attempt so that a runtime can tie what it produces to one
+placement of the job (DESIGN.md §6). It calls on_started(image_pulled) once the work is actually
 running, enforces max_runtime_s, and kills the work if its task is cancelled.
 """
 
@@ -28,7 +29,8 @@ class Outcome:
 
 
 class Runtime(Protocol):
-    async def run(self, job_id: str, spec: dict, on_started: OnStarted) -> Outcome: ...
+    async def run(self, job_id: str, attempt: int, spec: dict,
+                  on_started: OnStarted) -> Outcome: ...
 
 
 def _elapsed_ms(start: float) -> int:
@@ -36,7 +38,8 @@ def _elapsed_ms(start: float) -> int:
 
 
 class ProcessRuntime:
-    async def run(self, job_id: str, spec: dict, on_started: OnStarted) -> Outcome:
+    async def run(self, job_id: str, attempt: int, spec: dict,
+                  on_started: OnStarted) -> Outcome:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *spec["command"],
@@ -70,13 +73,14 @@ class DockerRuntime:
         self._errors = docker.errors
         self._client = docker.from_env()
 
-    async def run(self, job_id: str, spec: dict, on_started: OnStarted) -> Outcome:
+    async def run(self, job_id: str, attempt: int, spec: dict,
+                  on_started: OnStarted) -> Outcome:
         image = spec["image"]
         try:
             pulled = await asyncio.to_thread(self._ensure_image, image)
             container = await asyncio.to_thread(
                 self._client.containers.run, image, spec["command"], detach=True,
-                labels={"orch.job_id": job_id})
+                labels={"orch.job_id": job_id, "orch.attempt": str(attempt)})
         except self._errors.NotFound:  # includes ImageNotFound
             return Outcome(error=f"image not found: {image}")
         except self._errors.APIError as e:
