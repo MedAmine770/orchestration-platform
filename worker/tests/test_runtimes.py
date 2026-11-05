@@ -20,7 +20,7 @@ def run(job_spec: dict):
     async def on_started(image_pulled: bool) -> None:
         started.append(image_pulled)
 
-    outcome = asyncio.run(ProcessRuntime().run("job", job_spec, on_started))
+    outcome = asyncio.run(ProcessRuntime().run("job", 1, job_spec, on_started))
     return outcome, started
 
 
@@ -51,7 +51,7 @@ def test_cancel_kills_the_process():
             started.set()
 
         task = asyncio.create_task(ProcessRuntime().run(
-            "job", spec(sys.executable, "-c", "import time; time.sleep(30)"), on_started))
+            "job", 1, spec(sys.executable, "-c", "import time; time.sleep(30)"), on_started))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

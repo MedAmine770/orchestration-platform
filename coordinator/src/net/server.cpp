@@ -45,7 +45,12 @@ Server::Server(asio::io_context& ioc, ServerConfig config, const metrics::Regist
       jobs_(config_.jobs, nodes_, policy_, metrics),
       rng_(std::random_device{}()),
       api_(jobs_, nodes_, [this] { return uuid_v4(rng_); }),
-      deadline_timer_(ioc) {}
+      deadline_timer_(ioc) {
+    if (config_.admin_port) {
+        admin_acceptor_.emplace(
+            ioc, tcp::endpoint(asio::ip::make_address(config_.bind_address), *config_.admin_port));
+    }
+}
 
 bool Server::token_matches(std::string_view submitted) const {
     const auto candidate = sha256(submitted);
@@ -56,21 +61,31 @@ bool Server::token_matches(std::string_view submitted) const {
     return diff == 0;
 }
 
-void Server::start() { accept(); }
+void Server::start() {
+    accept(acceptor_, admin_acceptor_ ? Listener::workers : Listener::combined);
+    if (admin_acceptor_) accept(*admin_acceptor_, Listener::admin);
+}
 
 unsigned short Server::port() const { return acceptor_.local_endpoint().port(); }
 
-void Server::accept() {
-    acceptor_.async_accept(ioc_, [this](boost::system::error_code ec, tcp::socket socket) {
+std::optional<unsigned short> Server::admin_port() const {
+    if (!admin_acceptor_) return std::nullopt;
+    return admin_acceptor_->local_endpoint().port();
+}
+
+void Server::accept(tcp::acceptor& acceptor, Listener listener) {
+    const auto on_accept = [this, &acceptor, listener](boost::system::error_code ec,
+                                                       tcp::socket socket) {
         if (ec) {
             if (ec != asio::error::operation_aborted) {
                 std::cerr << "accept failed: " << ec.message() << '\n';
             }
             return;
         }
-        std::make_shared<HttpSession>(std::move(socket), *this)->run();
-        accept();
-    });
+        std::make_shared<HttpSession>(std::move(socket), *this, listener)->run();
+        accept(acceptor, listener);
+    };
+    acceptor.async_accept(ioc_, on_accept);
 }
 
 void Server::on_authenticated(const std::shared_ptr<WorkerSession>& session,

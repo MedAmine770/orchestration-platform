@@ -37,3 +37,12 @@ def test_profile_values_are_validated_by_the_protocol_rules():
     with pytest.raises(ProtocolError) as error:
         detect({"accelerator": "tpu"})
     assert error.value.code == "invalid_value"
+
+
+def test_default_runtime_is_docker_even_without_a_docker_cli(monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    assert detect()["runtimes"] == ["docker"]
+
+
+def test_process_runtime_needs_an_explicit_profile():
+    assert detect({"runtimes": ["process"]})["runtimes"] == ["process"]

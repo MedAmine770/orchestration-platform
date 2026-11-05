@@ -15,6 +15,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/steady_timer.hpp>
 
+#include "net/http_session.hpp"
 #include "orch/api.hpp"
 #include "orch/coordinator_metrics.hpp"
 #include "orch/jobs.hpp"
@@ -29,6 +30,9 @@ namespace orch::net {
 struct ServerConfig {
     std::string bind_address = "0.0.0.0";
     unsigned short port = 8080;  // 0 = let the OS pick (tests)
+    // Set: REST and /metrics move here, and `port` serves only the worker
+    // WebSocket and /healthz (DESIGN.md §7.4). 0 = let the OS pick.
+    std::optional<unsigned short> admin_port;
     std::string cluster_token;
     std::chrono::milliseconds hello_timeout{5000};
     std::chrono::milliseconds heartbeat_interval{1000};
@@ -59,6 +63,7 @@ class Server {
 
     void start();
     unsigned short port() const;  // the bound port, useful when configured as 0
+    std::optional<unsigned short> admin_port() const;
 
     const ServerConfig& config() const { return config_; }
     const metrics::Registry& registry() const { return registry_; }
@@ -86,7 +91,7 @@ class Server {
                     ApiDone done);
 
   private:
-    void accept();
+    void accept(boost::asio::ip::tcp::acceptor& acceptor, Listener listener);
     bool is_current(const WorkerSession& session) const;
     // Makes the core's changes durable and queues its messages (and `reply`)
     // to go out once they are; then re-arms the deadline timer.
@@ -96,6 +101,7 @@ class Server {
 
     boost::asio::io_context& ioc_;
     boost::asio::ip::tcp::acceptor acceptor_;
+    std::optional<boost::asio::ip::tcp::acceptor> admin_acceptor_;
     ServerConfig config_;
     std::array<unsigned char, 32> token_digest_{};
     const metrics::Registry& registry_;

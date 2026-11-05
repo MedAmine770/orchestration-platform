@@ -5,6 +5,12 @@ from __future__ import annotations
 import random
 from typing import Callable
 
+# Below the coordinator's default recovery window (--recovery-window-ms, 10 s;
+# DESIGN.md §8.3). Once a restarted coordinator is back, a worker's next attempt
+# is at most this far away, so it can reclaim its jobs instead of having them
+# rerun. A deployment that shortens the window must keep it above this.
+DEFAULT_CAP_S = 8.0
+
 
 class Backoff:
     """delay = uniform(0, min(cap, base * 2**attempt)).
@@ -13,7 +19,7 @@ class Backoff:
     workers don't all reconnect in the same instant (thundering herd).
     """
 
-    def __init__(self, base: float = 0.5, cap: float = 30.0,
+    def __init__(self, base: float = 0.5, cap: float = DEFAULT_CAP_S,
                  rng: Callable[[], float] = random.random):
         self.base = base
         self.cap = cap

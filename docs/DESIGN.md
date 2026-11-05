@@ -111,6 +111,8 @@ so the state machine is tested deterministically with no sockets and no sleeps.
   - `docker`: runs the job's image via the Docker SDK.
   - `process`: runs the command as a native subprocess. Needed because **Docker on
     macOS runs a Linux VM and cannot expose MPS**; real MPS jobs run on the Mac host.
+    It has no isolation, so a node only uses it when its profile asks for it. Otherwise
+    the agent uses `docker`, and exits with code 2 if Docker isn't reachable.
 - Tasks: connection (reconnect with exponential backoff + jitter), heartbeats, one task
   per running job. A long job can never delay a heartbeat.
 - Enforces each job's `max_runtime_s`.
@@ -328,6 +330,16 @@ this message rate.
   a job placed on the node that the worker doesn't report was lost with its previous
   process and is requeued as an infrastructure failure.
 
+### 7.4 Separating the public and private surfaces
+
+By default one port serves everything. REST has no auth (§1), so that port can't be
+exposed to workers on an untrusted network without also exposing job submission.
+
+`--admin-port` splits it: REST and `/metrics` move to the admin port, and `--port` keeps
+only the worker WebSocket. `/healthz` stays on both, for container health checks. The
+admin port doesn't accept worker upgrades, so each port has exactly one job, and a
+deployment can route `--port` to the outside and never publish the admin port.
+
 ## 8. Persistence and recovery
 
 ### 8.1 Store
@@ -374,6 +386,12 @@ state it can no longer persist.
    `(job_id, attempt)` resumes ownership.
 3. When the window closes, unclaimed jobs are handled as infrastructure failures (§5.3).
    A worker that reconnects later is fenced out (§6).
+
+The worker's reconnect backoff is capped at 8 s, below the default 10 s window, however
+long the outage was. So once the coordinator is back, a worker's next attempt is at most
+8 s away and it reclaims its jobs. An attempt already stuck in a connection timeout (10 s,
+for example if packets are being dropped) can still miss the window; that job reruns,
+safely, because of fencing. A shorter `--recovery-window-ms` must stay above the cap.
 
 Details:
 - A worker only lists jobs it has accepted, so a reclaimed `ASSIGNED` job counts as
@@ -565,6 +583,9 @@ docs/          DESIGN.md
 | D10 | Compose only; no warm pool | Scope fits two weeks |
 | D12 | Prometheus + Grafana required; metrics module built first; README uses exact percentiles from raw samples | Every milestone is observable; histogram quantiles are estimates, raw samples are exact |
 | D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
+| D15 | Optional `--admin-port` to split REST and `/metrics` from the worker WebSocket | Lets workers on an untrusted network connect without exposing unauthenticated REST (§7.4). The default stays one port, per D2 |
+| D16 | `process` runtime only when a profile asks for it; no fallback when Docker is missing | The fallback checked for a `docker` CLI, which the worker image lacks, so a worker with no profile would run jobs unisolated inside a container holding the Docker socket |
+| D17 | Worker backoff capped at 8 s, below the 10 s recovery window | With a 30 s cap, a long outage made about 44% of reconnects miss the window (simulated for a 60 s outage), rerunning jobs for no reason. The cost is less spread between reconnecting workers, which is fine at this scale |
 | D14 | Persist each job as one JSON document plus an append-only event history, rather than normalised columns rebuilt from events | Recovery is a straight load; the history stays for people. The document is versioned for schema changes |
 
 ## 15. Milestones (~2 weeks)

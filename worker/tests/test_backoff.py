@@ -1,4 +1,4 @@
-from orch_worker.backoff import Backoff
+from orch_worker.backoff import DEFAULT_CAP_S, Backoff
 
 
 def test_ceiling_doubles_up_to_the_cap():
@@ -10,6 +10,11 @@ def test_delays_stay_within_zero_and_the_cap():
     b = Backoff(base=0.5, cap=30.0)
     delays = [b.next() for _ in range(200)]  # also exercises a large exponent
     assert all(0 <= d <= 30.0 for d in delays)
+
+
+def test_default_cap_is_below_the_coordinators_default_recovery_window():
+    b = Backoff(rng=lambda: 1.0)  # the largest delay possible on every attempt
+    assert max(b.next() for _ in range(50)) == DEFAULT_CAP_S < 10.0
 
 
 def test_reset_starts_over():

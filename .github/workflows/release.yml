@@ -1,0 +1,72 @@
+name: Release images
+
+# Publishes the coordinator and worker images to GHCR for amd64 and arm64.
+# Each architecture builds on a native runner: the coordinator compiles its
+# vcpkg dependencies, which takes far too long under QEMU emulation.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/medamine770
+
+jobs:
+  build:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [coordinator, worker]
+        arch: [amd64, arm64]
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.image }}
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/orch-${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=release-${{ matrix.image }}-${{ matrix.arch }},mode=max
+
+  manifest:
+    name: multi-arch manifests
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        image: [coordinator, worker]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Consumers should pin the digest this prints, not the tag.
+      - name: Publish the manifest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/orch-${{ matrix.image }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: |
+          tags=(-t "$IMAGE:$SHA")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tags+=(-t "$IMAGE:$REF"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:$SHA-amd64" "$IMAGE:$SHA-arm64"
+          docker buildx imagetools inspect "$IMAGE:$SHA" | tee -a "$GITHUB_STEP_SUMMARY"

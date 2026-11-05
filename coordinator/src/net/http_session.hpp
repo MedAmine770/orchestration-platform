@@ -11,11 +11,18 @@ namespace orch::net {
 
 class Server;
 
+// What a listening port serves (DESIGN.md §7.4). /healthz is on all of them.
+enum class Listener {
+    combined,  // everything on one port (the default)
+    workers,   // only the worker WebSocket: safe to route to from outside
+    admin,     // only REST and /metrics: unauthenticated, so must stay private
+};
+
 // One plain-HTTP connection: serves /healthz and /metrics with keep-alive, and
 // hands `GET /v1/workers` upgrade requests to a WorkerSession.
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
   public:
-    HttpSession(boost::asio::ip::tcp::socket&& socket, Server& server);
+    HttpSession(boost::asio::ip::tcp::socket&& socket, Server& server, Listener listener);
     void run();
 
   private:
@@ -32,6 +39,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     std::optional<boost::beast::http::request_parser<boost::beast::http::string_body>> parser_;
     Response response_;  // kept alive until async_write completes
     Server& server_;
+    Listener listener_;
 };
 
 }  // namespace orch::net

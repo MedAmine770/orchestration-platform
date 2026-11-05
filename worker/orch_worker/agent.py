@@ -185,7 +185,7 @@ class Agent:
             async with self.slots:
                 log.info("job %s attempt %d: running %s", key[0], key[1], spec["command"])
                 try:
-                    outcome = await self.runtime.run(key[0], spec, on_started)
+                    outcome = await self.runtime.run(key[0], key[1], spec, on_started)
                 except asyncio.CancelledError:
                     raise  # cancelled: the coordinator already moved on, no result
                 except Exception as e:  # a runtime bug must not kill the agent
