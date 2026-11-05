@@ -19,7 +19,10 @@ WINDOW_MS = 9000
 @pytest.fixture
 def coordinator(tmp_path):
     """Overrides the shared fixture: a shorter recovery window keeps this fast."""
-    process = CoordinatorProcess(tmp_path, ("--recovery-window-ms", str(WINDOW_MS)))
+    # conftest's 300 ms ack timeout is too tight here: on a slow CI runner an ack
+    # can miss it, which requeues the job before the crash and looks like a rerun.
+    process = CoordinatorProcess(tmp_path, ("--recovery-window-ms", str(WINDOW_MS),
+                                            "--ack-timeout-ms", "10000"))
     process.start()
     yield process
     process.stop()
@@ -53,7 +56,8 @@ def test_coordinator_crash_loses_nothing_and_reruns_nothing(coordinator, start_w
     for job_id in (long_job, short_job):
         final = wait_for_state(coordinator, job_id, TERMINAL, timeout=20)
         assert final["state"] == "succeeded", final
-        assert final["attempt"] == 1 and final["retries_used"] == 0, final
+        history = [(a["attempt"], a["outcome"]) for a in final["attempts"]]
+        assert final["attempt"] == 1 and final["retries_used"] == 0, history
         assert final["attempts"][0]["outcome"] == "succeeded"
     assert job(coordinator, gpu_job)["state"] == "unschedulable"
 
