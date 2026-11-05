@@ -11,7 +11,9 @@ from test_job_lifecycle import http
 from test_worker_agent import TERMINAL, python, submit, wait_for_state
 from test_worker_connection import eventually, scrape
 
-WINDOW_MS = 4000
+# Must stay above the worker's backoff cap (8 s), or a worker can legitimately
+# miss the window and its job reruns (DESIGN.md §8.3).
+WINDOW_MS = 9000
 
 
 @pytest.fixture

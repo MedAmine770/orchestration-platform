@@ -387,6 +387,12 @@ state it can no longer persist.
 3. When the window closes, unclaimed jobs are handled as infrastructure failures (§5.3).
    A worker that reconnects later is fenced out (§6).
 
+The worker's reconnect backoff is capped at 8 s, below the default 10 s window, however
+long the outage was. So once the coordinator is back, a worker's next attempt is at most
+8 s away and it reclaims its jobs. An attempt already stuck in a connection timeout (10 s,
+for example if packets are being dropped) can still miss the window; that job reruns,
+safely, because of fencing. A shorter `--recovery-window-ms` must stay above the cap.
+
 Details:
 - A worker only lists jobs it has accepted, so a reclaimed `ASSIGNED` job counts as
   acked (its `ack` was lost with the crash).
@@ -579,6 +585,7 @@ docs/          DESIGN.md
 | D13 | Split queue wait (`QUEUED` → `assign` sent) from dispatch (`assign` sent → `ack`); start latency stays end to end | The M5 demo showed `QUEUED` → `ack` under a burst is mostly waiting for a slot, which hid the scheduler's own latency |
 | D15 | Optional `--admin-port` to split REST and `/metrics` from the worker WebSocket | Lets workers on an untrusted network connect without exposing unauthenticated REST (§7.4). The default stays one port, per D2 |
 | D16 | `process` runtime only when a profile asks for it; no fallback when Docker is missing | The fallback checked for a `docker` CLI, which the worker image lacks, so a worker with no profile would run jobs unisolated inside a container holding the Docker socket |
+| D17 | Worker backoff capped at 8 s, below the 10 s recovery window | With a 30 s cap, a long outage made about 44% of reconnects miss the window (simulated for a 60 s outage), rerunning jobs for no reason. The cost is less spread between reconnecting workers, which is fine at this scale |
 | D14 | Persist each job as one JSON document plus an append-only event history, rather than normalised columns rebuilt from events | Recovery is a straight load; the history stays for people. The document is versioned for schema changes |
 
 ## 15. Milestones (~2 weeks)
